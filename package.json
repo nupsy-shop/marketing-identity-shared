@@ -1,0 +1,6 @@
+{
+  "name": "marketing-identity-shared",
+  "version": "1.0.0",
+  "description": "Shared libraries for marketing-identity web app and Bull worker",
+  "type": "module"
+}
