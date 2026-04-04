@@ -11,11 +11,11 @@
  *   LOG_FORMAT=json|text (default: 'json' in production, 'text' in development)
  */
 
-const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+const LOG_LEVELS: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 const CURRENT_LEVEL = LOG_LEVELS[process.env.LOG_LEVEL || 'info'] || LOG_LEVELS.info;
 const IS_JSON = process.env.LOG_FORMAT === 'json' || process.env.NODE_ENV === 'production';
 
-function formatMessage(level, msg, ctx) {
+function formatMessage(level: string, msg: string, ctx: Record<string, unknown>): string {
   if (IS_JSON) {
     return JSON.stringify({ level, msg, ts: new Date().toISOString(), ...ctx });
   }
@@ -25,16 +25,16 @@ function formatMessage(level, msg, ctx) {
 }
 
 export const logger = {
-  debug(msg, ctx = {}) {
+  debug(msg: string, ctx: Record<string, unknown> = {}) {
     if (CURRENT_LEVEL <= LOG_LEVELS.debug) console.log(formatMessage('debug', msg, ctx));
   },
-  info(msg, ctx = {}) {
+  info(msg: string, ctx: Record<string, unknown> = {}) {
     if (CURRENT_LEVEL <= LOG_LEVELS.info) console.log(formatMessage('info', msg, ctx));
   },
-  warn(msg, ctx = {}) {
+  warn(msg: string, ctx: Record<string, unknown> = {}) {
     if (CURRENT_LEVEL <= LOG_LEVELS.warn) console.warn(formatMessage('warn', msg, ctx));
   },
-  error(msg, ctx = {}) {
+  error(msg: string, ctx: Record<string, unknown> = {}) {
     if (CURRENT_LEVEL <= LOG_LEVELS.error) console.error(formatMessage('error', msg, ctx));
   },
 };
