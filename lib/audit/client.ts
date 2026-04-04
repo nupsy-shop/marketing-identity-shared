@@ -1,4 +1,9 @@
-// Stub — real implementation fetched during heroku-postbuild
+/**
+ * Elasticsearch client for the Audit & Compliance engine.
+ *
+ * Uses the SEARCHBOX_URL env var provisioned by the SearchBox Heroku add-on.
+ * Provides low-level index management and document operations.
+ */
 
 export interface SearchOptions {
   index?: string;
@@ -9,15 +14,232 @@ export interface SearchOptions {
   [key: string]: unknown;
 }
 
-export function search(_options?: SearchOptions, _indices?: string | string[]): Promise<{
-  hits: { total: number | { value: number }; hits: Array<{ _source: Record<string, unknown> }> };
-}> {
-  return Promise.resolve({ hits: { total: { value: 0 }, hits: [] } });
+export interface AuditDocument {
+  eventId: string;
+  timestamp: string;
+  [key: string]: unknown;
 }
 
-export function ensureIndexTemplate(): Promise<void> { return Promise.resolve(); }
-export function ensureCurrentIndex(): Promise<void> { return Promise.resolve(); }
-export function clusterHealth(): Promise<Record<string, unknown>> { return Promise.resolve({}); }
-export function ping(): Promise<boolean> { return Promise.resolve(true); }
-export function allIndicesPattern(): string { return 'audit-*'; }
-export function indexNameForDate(_date?: Date): string { return 'audit-' + new Date().toISOString().slice(0, 10); }
+// ─── Connection Parsing ──────────────────────────────────────────────────────
+
+let _esBase: string | null = null;
+let _esAuth: string | null = null;
+
+function parseEsUrl(): void {
+  if (_esBase !== null) return;
+  const raw = process.env.SEARCHBOX_URL;
+  if (!raw) { _esBase = ''; return; }
+
+  try {
+    const u = new URL(raw);
+    if (u.username) {
+      _esAuth = 'Basic ' + Buffer.from(`${u.username}:${u.password}`).toString('base64');
+      _esBase = `${u.protocol}//${u.host}`;
+    } else {
+      _esBase = raw.replace(/\/$/, '');
+    }
+  } catch {
+    _esBase = raw.replace(/\/$/, '');
+  }
+}
+
+const ES_URL = (): string => { parseEsUrl(); return _esBase!; };
+const ES_AUTH = (): string | null => { parseEsUrl(); return _esAuth; };
+
+// ─── Index Management ────────────────────────────────────────────────────────
+
+export function currentIndexName(): string {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0');
+  return `audit-${y}.${m}`;
+}
+
+export function indexNameForDate(date: Date | string): string {
+  const d = new Date(date);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `audit-${y}.${m}`;
+}
+
+export function allIndicesPattern(): string {
+  return 'audit-*';
+}
+
+// ─── Low-Level Fetch ─────────────────────────────────────────────────────────
+
+async function esFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const base = ES_URL();
+  if (!base) throw new Error('SEARCHBOX_URL not configured');
+
+  const auth = ES_AUTH();
+  const url = `${base}${path}`;
+  return fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(auth ? { Authorization: auth } : {}),
+      ...(options.headers as Record<string, string> | undefined),
+    },
+  });
+}
+
+// ─── Index Template ──────────────────────────────────────────────────────────
+
+const INDEX_TEMPLATE = {
+  index_patterns: ['audit-*'],
+  settings: {
+    number_of_shards: 1,
+    number_of_replicas: 0,
+    'index.mapping.total_fields.limit': 200,
+  },
+  mappings: {
+    properties: {
+      eventId:    { type: 'keyword' },
+      timestamp:  { type: 'date' },
+      eventType:  { type: 'keyword' },
+      source:     { type: 'keyword' },
+      severity:   { type: 'keyword' },
+      'actor.id':    { type: 'keyword' },
+      'actor.email': { type: 'keyword' },
+      'actor.type':  { type: 'keyword' },
+      'actor.ip':    { type: 'ip', ignore_malformed: true },
+      'agency.id':   { type: 'keyword' },
+      'agency.slug': { type: 'keyword' },
+      'client.id':   { type: 'keyword' },
+      'client.name': { type: 'keyword' },
+      'resource.type': { type: 'keyword' },
+      'resource.id':   { type: 'keyword' },
+      'resource.name': { type: 'text', fields: { keyword: { type: 'keyword' } } },
+      context: { type: 'object', enabled: true },
+      eventHash: { type: 'keyword' },
+      prevHash:  { type: 'keyword' },
+      retentionDays: { type: 'integer' },
+    },
+  },
+};
+
+export async function ensureIndexTemplate(): Promise<void> {
+  try {
+    const res = await esFetch('/_template/audit-template', {
+      method: 'PUT',
+      body: JSON.stringify(INDEX_TEMPLATE),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error('[Audit ES] Failed to create index template:', res.status, text);
+    } else {
+      console.log('[Audit ES] Index template ensured');
+    }
+  } catch (err: unknown) {
+    console.error('[Audit ES] Template setup error:', (err as Error).message);
+  }
+}
+
+export async function ensureCurrentIndex(): Promise<void> {
+  const idx = currentIndexName();
+  try {
+    const head = await esFetch(`/${idx}`, { method: 'HEAD' });
+    if (head.status === 404) {
+      const create = await esFetch(`/${idx}`, { method: 'PUT' });
+      if (!create.ok) {
+        const text = await create.text();
+        console.error('[Audit ES] Failed to create index', idx, ':', text);
+      } else {
+        console.log('[Audit ES] Created index:', idx);
+      }
+    }
+  } catch (err: unknown) {
+    console.error('[Audit ES] Index check error:', (err as Error).message);
+  }
+}
+
+// ─── Document Operations ─────────────────────────────────────────────────────
+
+export async function indexDocument(doc: AuditDocument): Promise<Record<string, unknown>> {
+  const idx = currentIndexName();
+  const res = await esFetch(`/${idx}/_doc/${doc.eventId}`, {
+    method: 'PUT',
+    body: JSON.stringify(doc),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`ES index failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function bulkIndex(docs: AuditDocument[]): Promise<{ errors: boolean; items: Array<Record<string, unknown>> }> {
+  if (!docs.length) return { errors: false, items: [] };
+
+  const lines: string[] = [];
+  for (const doc of docs) {
+    const idx = indexNameForDate(doc.timestamp);
+    lines.push(JSON.stringify({ index: { _index: idx, _id: doc.eventId } }));
+    lines.push(JSON.stringify(doc));
+  }
+  const body = lines.join('\n') + '\n';
+
+  const res = await esFetch('/_bulk', {
+    method: 'POST',
+    body,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`ES bulk failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function search(
+  queryBody: Record<string, unknown>,
+  indices?: string,
+): Promise<{
+  hits: { total: number | { value: number }; hits: Array<{ _source: Record<string, unknown> }> };
+  aggregations?: Record<string, { buckets?: Array<{ key: string; doc_count: number }> }>;
+}> {
+  const idx = indices || allIndicesPattern();
+  const res = await esFetch(`/${idx}/_search`, {
+    method: 'POST',
+    body: JSON.stringify(queryBody),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`ES search failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function deleteByQuery(
+  queryBody: Record<string, unknown>,
+  indices?: string,
+): Promise<Record<string, unknown>> {
+  const idx = indices || allIndicesPattern();
+  const res = await esFetch(`/${idx}/_delete_by_query`, {
+    method: 'POST',
+    body: JSON.stringify(queryBody),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`ES delete_by_query failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function clusterHealth(): Promise<Record<string, unknown>> {
+  const res = await esFetch('/_cluster/health');
+  if (!res.ok) return {};
+  return res.json();
+}
+
+export async function ping(): Promise<boolean> {
+  try {
+    const res = await esFetch('/');
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
