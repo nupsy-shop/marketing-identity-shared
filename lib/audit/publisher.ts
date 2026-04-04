@@ -9,7 +9,7 @@
  */
 
 import crypto from 'crypto';
-import { bulkIndex, ping, ensureCurrentIndex } from './client.js';
+import { bulkIndex, ping, ensureCurrentIndex } from './client';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -109,7 +109,7 @@ async function flush(): Promise<void> {
 
   if (_esAvailable) {
     try {
-      const result = await bulkIndex(batch as unknown as import('./client.js').AuditDocument[]);
+      const result = await bulkIndex(batch as unknown as import('./client').AuditDocument[]);
       if (result.errors) {
         const failed = result.items?.filter((i: Record<string, unknown>) => {
           const idx = i.index as Record<string, unknown> | undefined;
