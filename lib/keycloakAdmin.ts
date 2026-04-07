@@ -149,6 +149,12 @@ export async function createKeycloakUser(
     body: JSON.stringify({ enabled: true, ...payload }),
   });
 
+  if (res.status === 409 && user.email) {
+    // User already exists — find and return existing user (idempotent)
+    const existing = await findKeycloakUserByEmail(realm, user.email);
+    if (existing) return existing;
+  }
+
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Failed to create Keycloak user (${res.status}): ${text}`);
