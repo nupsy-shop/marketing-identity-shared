@@ -6,7 +6,7 @@
  * Powers both the Audit & Reports page and Activity tabs.
  */
 
-import { search, allIndicesPattern, indexNameForDate } from './client';
+import { search, allIndicesPattern, indexNameForDate } from './client.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -178,7 +178,7 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
     const total = typeof rawTotal === 'number' ? rawTotal : rawTotal?.value || 0;
 
     return {
-      data: hits.map(h => h._source) as unknown as AuditEvent[],
+      data: hits.map((h: any) => h._source) as unknown as AuditEvent[],
       total,
       limit: queryBody.size,
       offset: queryBody.from,
