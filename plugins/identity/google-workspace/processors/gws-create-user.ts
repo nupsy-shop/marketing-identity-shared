@@ -11,6 +11,7 @@
 
 import type Bull from 'bull';
 import { reconcileProvisioningStatus } from '../../../../lib/provisioningReconciler.js';
+import { getRuntime } from '../../../../lib/runtime.js';
 
 interface JobResult {
   status: 'completed';
@@ -19,23 +20,20 @@ interface JobResult {
 
 export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   const { tenantId, identityId, email, displayName, platformKey } = job.data;
-
-  // Lazy-import prisma to avoid circular dependency at module load
-  const { default: prisma } = await import('../../../../lib/prisma.js');
-  const { logger } = await import('../../../../lib/logger.js');
+  const { prisma, logger } = getRuntime();
 
   // 1. Load identity from DB — verify it still exists
-  const identity = await (prisma as any).integration_identities.findUnique({
+  const identity = await prisma.integration_identities.findUnique({
     where: { id: identityId },
   });
 
   if (!identity) {
-    logger.warn({ jobId: job.id, identityId }, 'gws_create_user: identity not found — deleted before processing');
+    logger.warn('gws_create_user: identity not found — deleted before processing', { jobId: String(job.id), identityId });
     return { status: 'completed', jobType: 'gws_create_user' };
   }
 
   // 2. Load GWS source config from DB
-  const source = await (prisma as any).identity_sources.findFirst({
+  const source = await prisma.identity_sources.findFirst({
     where: {
       agency_id: tenantId,
       plugin_key: 'google-workspace',
@@ -51,14 +49,14 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
       updatedAt: new Date().toISOString(),
     });
     await reconcileProvisioningStatus(prisma, identityId);
-    logger.info({ jobId: job.id, identityId }, 'gws_create_user: no enabled GWS source, skipped');
+    logger.info('gws_create_user: no enabled GWS source, skipped', { jobId: String(job.id), identityId });
     return { status: 'completed', jobType: 'gws_create_user' };
   }
 
   // 3. Resolve OAuth access token
   let accessToken: string | null = null;
   if (source.oauth_token_id) {
-    const token = await (prisma as any).oauth_tokens.findUnique({
+    const token = await prisma.oauth_tokens.findUnique({
       where: { id: source.oauth_token_id },
     });
     if (token && token.is_active !== false) {
@@ -100,25 +98,26 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
       updatedAt: new Date().toISOString(),
     });
 
-    logger.info(
-      { jobId: job.id, identityId, userId: result.userId, created: result.created },
-      'gws_create_user: user provisioned in Google Workspace',
-    );
+    logger.info('gws_create_user: user provisioned in Google Workspace', {
+      jobId: String(job.id), identityId, userId: result.userId, created: String(result.created),
+    });
 
     // 7. Sync readiness to Keycloak (if Keycloak already provisioned)
     if (identity.keycloak_user_id) {
       try {
         const { mergeUserAttributes } = await import('../../../../lib/keycloakAdmin.js');
-        const settings = await (prisma as any).agency_settings.findUnique({
+        const settings = await prisma.agency_settings.findUnique({
           where: { agency_id: tenantId },
         });
         const realm = settings?.keycloak_realm || tenantId;
         await mergeUserAttributes(identity.keycloak_user_id, {
-          mih_ready_google: 'true',
-          mih_ready_google_checkedAt: new Date().toISOString(),
+          mih_ready_google: ['true'],
+          mih_ready_google_checkedAt: [new Date().toISOString()],
         }, realm);
       } catch (kcErr) {
-        logger.warn({ jobId: job.id, error: (kcErr as Error).message }, 'gws_create_user: KC readiness sync failed (non-fatal)');
+        logger.warn('gws_create_user: KC readiness sync failed (non-fatal)', {
+          jobId: String(job.id), error: (kcErr as Error).message,
+        });
       }
     }
   } catch (err) {
@@ -133,14 +132,14 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     if (identity.keycloak_user_id) {
       try {
         const { mergeUserAttributes } = await import('../../../../lib/keycloakAdmin.js');
-        const settings = await (prisma as any).agency_settings.findUnique({
+        const settings = await prisma.agency_settings.findUnique({
           where: { agency_id: tenantId },
         });
         const realm = settings?.keycloak_realm || tenantId;
         await mergeUserAttributes(identity.keycloak_user_id, {
-          mih_ready_google: 'false',
-          mih_ready_google_checkedAt: new Date().toISOString(),
-          mih_ready_google_reason: 'PROVISION_ERROR',
+          mih_ready_google: ['false'],
+          mih_ready_google_checkedAt: [new Date().toISOString()],
+          mih_ready_google_reason: ['PROVISION_ERROR'],
         }, realm);
       } catch (_) { /* non-fatal */ }
     }

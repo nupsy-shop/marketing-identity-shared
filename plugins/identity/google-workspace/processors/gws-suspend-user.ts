@@ -6,6 +6,7 @@
  */
 
 import type Bull from 'bull';
+import { getRuntime } from '../../../../lib/runtime.js';
 
 interface JobResult {
   status: 'completed';
@@ -14,12 +15,10 @@ interface JobResult {
 
 export default async function gwsSuspendUser(job: Bull.Job): Promise<JobResult> {
   const { tenantId, email, googleUserId } = job.data;
-
-  const { default: prisma } = await import('../../../../lib/prisma.js');
-  const { logger } = await import('../../../../lib/logger.js');
+  const { prisma, logger } = getRuntime();
 
   // 1. Load GWS source config
-  const source = await (prisma as any).identity_sources.findFirst({
+  const source = await prisma.identity_sources.findFirst({
     where: {
       agency_id: tenantId,
       plugin_key: 'google-workspace',
@@ -28,14 +27,14 @@ export default async function gwsSuspendUser(job: Bull.Job): Promise<JobResult> 
   });
 
   if (!source) {
-    logger.info({ jobId: job.id }, 'gws_suspend_user: no enabled GWS source, skipped');
+    logger.info('gws_suspend_user: no enabled GWS source, skipped', { jobId: String(job.id) });
     return { status: 'completed', jobType: 'gws_suspend_user' };
   }
 
   // 2. Resolve OAuth access token
   let accessToken: string | null = null;
   if (source.oauth_token_id) {
-    const token = await (prisma as any).oauth_tokens.findUnique({
+    const token = await prisma.oauth_tokens.findUnique({
       where: { id: source.oauth_token_id },
     });
     if (token && token.is_active !== false) {
@@ -53,7 +52,7 @@ export default async function gwsSuspendUser(job: Bull.Job): Promise<JobResult> 
 
   await updateUser(accessToken, userKey, { suspended: true });
 
-  logger.info({ jobId: job.id, userKey }, 'gws_suspend_user: user suspended in Google Workspace');
+  logger.info('gws_suspend_user: user suspended in Google Workspace', { jobId: String(job.id), userKey });
 
   return { status: 'completed', jobType: 'gws_suspend_user' };
 }
