@@ -1,0 +1,3 @@
+{
+  "google-workspace": "./identity/google-workspace/processors/index.js"
+}
