@@ -6,7 +6,7 @@
  * Powers both the Audit & Reports page and Activity tabs.
  */
 
-import { search, allIndicesPattern, indexNameForDate } from './client';
+import { search, allIndicesPattern, indexNameForDate } from './client.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 

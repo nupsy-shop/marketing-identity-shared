@@ -9,7 +9,7 @@
  */
 
 import crypto from 'crypto';
-import { bulkIndex, ping, ensureCurrentIndex } from './client';
+import { bulkIndex, ping, ensureCurrentIndex } from './client.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
