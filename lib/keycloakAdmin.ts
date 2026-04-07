@@ -31,8 +31,12 @@ function baseUrl(): string | undefined {
 export function isKeycloakAdminConfigured(): boolean {
   return !!(
     process.env.KEYCLOAK_ADMIN_BASE_URL &&
-    process.env.KEYCLOAK_ADMIN_CLIENT_ID &&
-    process.env.KEYCLOAK_ADMIN_CLIENT_SECRET
+    (
+      // Client credentials mode
+      (process.env.KEYCLOAK_ADMIN_CLIENT_ID && process.env.KEYCLOAK_ADMIN_CLIENT_SECRET) ||
+      // Password grant mode (master admin)
+      (process.env.KEYCLOAK_MASTER_ADMIN_USER && process.env.KEYCLOAK_MASTER_ADMIN_PASSWORD)
+    )
   );
 }
 
@@ -48,11 +52,24 @@ async function getAdminToken(): Promise<string> {
   }
 
   const url = `${baseUrl()}/realms/master/protocol/openid-connect/token`;
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID!,
-    client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET!,
-  });
+  let body: URLSearchParams;
+
+  if (process.env.KEYCLOAK_MASTER_ADMIN_USER && process.env.KEYCLOAK_MASTER_ADMIN_PASSWORD) {
+    // Password grant (master admin) — preferred for multi-realm access
+    body = new URLSearchParams({
+      grant_type: 'password',
+      client_id: 'admin-cli',
+      username: process.env.KEYCLOAK_MASTER_ADMIN_USER,
+      password: process.env.KEYCLOAK_MASTER_ADMIN_PASSWORD,
+    });
+  } else {
+    // Client credentials grant
+    body = new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: process.env.KEYCLOAK_ADMIN_CLIENT_ID!,
+      client_secret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET!,
+    });
+  }
 
   const res = await fetch(url, {
     method: 'POST',
