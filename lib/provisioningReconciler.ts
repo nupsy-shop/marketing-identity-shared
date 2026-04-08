@@ -11,9 +11,16 @@
  * finish near-simultaneously.
  */
 
+import {
+  ProviderStatus,
+  IdentityProvisioningStatus,
+  isTerminalProviderStatus,
+  type ProvidersStatusMap,
+} from './provisioning-types';
+
 export interface ReconcileResult {
   reconciled: boolean;
-  finalStatus: 'PROVISIONED' | 'ERROR' | 'PENDING';
+  finalStatus: IdentityProvisioningStatus;
 }
 
 /**
@@ -36,44 +43,39 @@ export async function reconcileProvisioningStatus(
   });
 
   if (!identity) {
-    return { reconciled: false, finalStatus: 'PENDING' };
+    return { reconciled: false, finalStatus: IdentityProvisioningStatus.PENDING };
   }
 
   // Already in a terminal state — nothing to do
-  if (identity.provisioning_status === 'PROVISIONED') {
-    return { reconciled: false, finalStatus: 'PROVISIONED' };
+  if (identity.provisioning_status === IdentityProvisioningStatus.PROVISIONED) {
+    return { reconciled: false, finalStatus: IdentityProvisioningStatus.PROVISIONED };
   }
 
-  const providerStatus = (identity.provisioning_providers_status || {}) as Record<
-    string,
-    { status: string }
-  >;
+  const providerStatus = (identity.provisioning_providers_status || {}) as ProvidersStatusMap;
   const statuses = Object.values(providerStatus);
 
   if (statuses.length === 0) {
-    return { reconciled: false, finalStatus: 'PENDING' };
+    return { reconciled: false, finalStatus: IdentityProvisioningStatus.PENDING };
   }
 
-  const anyPending = statuses.some((p) => p.status === 'PENDING');
-  const anyError = statuses.some((p) => p.status === 'ERROR');
-  const allDone = statuses.every(
-    (p) => p.status === 'PROVISIONED' || p.status === 'SKIPPED',
-  );
+  const anyPending = statuses.some((p) => p.status === ProviderStatus.PENDING);
+  const anyError = statuses.some((p) => p.status === ProviderStatus.ERROR);
+  const allDone = statuses.every((p) => isTerminalProviderStatus(p.status));
 
   if (allDone) {
     // Atomic update: only transition if not already PROVISIONED
     const updated = await prisma.integration_identities.updateMany({
       where: {
         id: identityId,
-        provisioning_status: { not: 'PROVISIONED' },
+        provisioning_status: { not: IdentityProvisioningStatus.PROVISIONED },
       },
       data: {
-        provisioning_status: 'PROVISIONED',
+        provisioning_status: IdentityProvisioningStatus.PROVISIONED,
         provisioned_at: new Date(),
         updatedAt: new Date(),
       },
     });
-    return { reconciled: updated.count > 0, finalStatus: 'PROVISIONED' };
+    return { reconciled: updated.count > 0, finalStatus: IdentityProvisioningStatus.PROVISIONED };
   }
 
   if (anyError && !anyPending) {
@@ -81,16 +83,16 @@ export async function reconcileProvisioningStatus(
     await prisma.integration_identities.updateMany({
       where: {
         id: identityId,
-        provisioning_status: { notIn: ['PROVISIONED', 'ERROR'] },
+        provisioning_status: { notIn: [IdentityProvisioningStatus.PROVISIONED, IdentityProvisioningStatus.ERROR] },
       },
       data: {
-        provisioning_status: 'ERROR',
+        provisioning_status: IdentityProvisioningStatus.ERROR,
         updatedAt: new Date(),
       },
     });
-    return { reconciled: true, finalStatus: 'ERROR' };
+    return { reconciled: true, finalStatus: IdentityProvisioningStatus.ERROR };
   }
 
   // Some still PENDING — do nothing, next processor will reconcile
-  return { reconciled: false, finalStatus: 'PENDING' };
+  return { reconciled: false, finalStatus: IdentityProvisioningStatus.PENDING };
 }

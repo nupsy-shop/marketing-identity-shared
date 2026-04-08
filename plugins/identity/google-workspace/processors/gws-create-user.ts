@@ -12,6 +12,7 @@
 import type Bull from 'bull';
 import { reconcileProvisioningStatus } from '../../../../lib/provisioningReconciler.js';
 import { getRuntime } from '../../../../lib/runtime.js';
+import { ProviderStatus } from '../../../../lib/provisioning-types.js';
 
 interface JobResult {
   status: 'completed';
@@ -44,7 +45,7 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   if (!source) {
     // No GWS source configured or provisioning disabled — mark SKIPPED
     await updateProviderStatus(prisma, identityId, 'google-workspace', {
-      status: 'SKIPPED',
+      status: ProviderStatus.SKIPPED,
       reason: 'Google Workspace provisioning not enabled for this agency',
       updatedAt: new Date().toISOString(),
     });
@@ -107,7 +108,7 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
 
     // 6. Update provider status
     await updateProviderStatus(prisma, identityId, 'google-workspace', {
-      status: 'PROVISIONED',
+      status: ProviderStatus.PROVISIONED,
       externalId: result.userId,
       updatedAt: new Date().toISOString(),
     });
@@ -137,7 +138,7 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   } catch (err) {
     // Update provider status with error
     await updateProviderStatus(prisma, identityId, 'google-workspace', {
-      status: 'ERROR',
+      status: ProviderStatus.ERROR,
       error: (err as Error).message,
       updatedAt: new Date().toISOString(),
     });
