@@ -16,7 +16,8 @@ import {
   IdentityProvisioningStatus,
   isTerminalProviderStatus,
   type ProvidersStatusMap,
-} from './provisioning-types';
+  type ProviderStatusEntry,
+} from './provisioning-types.js';
 
 export interface ReconcileResult {
   reconciled: boolean;
@@ -52,7 +53,7 @@ export async function reconcileProvisioningStatus(
   }
 
   const providerStatus = (identity.provisioning_providers_status || {}) as unknown as ProvidersStatusMap;
-  const statuses = Object.values(providerStatus);
+  const statuses: ProviderStatusEntry[] = Object.values(providerStatus);
 
   if (statuses.length === 0) {
     return { reconciled: false, finalStatus: IdentityProvisioningStatus.PENDING };
