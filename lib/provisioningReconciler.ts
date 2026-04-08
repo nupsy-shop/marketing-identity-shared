@@ -51,7 +51,7 @@ export async function reconcileProvisioningStatus(
     return { reconciled: false, finalStatus: IdentityProvisioningStatus.PROVISIONED };
   }
 
-  const providerStatus = (identity.provisioning_providers_status || {}) as ProvidersStatusMap;
+  const providerStatus = (identity.provisioning_providers_status || {}) as unknown as ProvidersStatusMap;
   const statuses = Object.values(providerStatus);
 
   if (statuses.length === 0) {
