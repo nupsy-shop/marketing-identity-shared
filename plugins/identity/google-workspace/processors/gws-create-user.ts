@@ -53,14 +53,28 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     return { status: 'completed', jobType: 'gws_create_user' };
   }
 
-  // 3. Resolve OAuth access token
+  // 3. Resolve OAuth access token (with refresh if expired)
   let accessToken: string | null = null;
   if (source.oauth_token_id) {
     const token = await prisma.oauth_tokens.findUnique({
       where: { id: source.oauth_token_id },
     });
     if (token && token.isActive !== false) {
-      accessToken = token.accessToken;
+      const expiresAt = token.expiresAt ? new Date(token.expiresAt).getTime() : 0;
+      const isExpired = Date.now() > expiresAt - 5 * 60 * 1000; // 5 min buffer
+
+      if (isExpired && token.refreshToken) {
+        // Refresh the token
+        const refreshed = await refreshGoogleToken(prisma, token);
+        if (refreshed) {
+          accessToken = refreshed;
+        } else {
+          // Refresh failed — try existing token as last resort
+          accessToken = token.accessToken;
+        }
+      } else {
+        accessToken = token.accessToken;
+      }
     }
   }
 
@@ -151,6 +165,60 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   await reconcileProvisioningStatus(prisma, identityId);
 
   return { status: 'completed', jobType: 'gws_create_user' };
+}
+
+// ─── Token Refresh ───────────────────────────────────────────────────────
+
+const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+
+async function refreshGoogleToken(
+  prisma: any,
+  token: { id: string; refreshToken: string | null; scopes: string[]; [key: string]: unknown },
+): Promise<string | null> {
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  try {
+    const res = await fetch(GOOGLE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: token.refreshToken || '',
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    });
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const data = await res.json();
+    const expiresAt = data.expires_in
+      ? new Date(Date.now() + data.expires_in * 1000)
+      : null;
+
+    // Update stored token in DB
+    await prisma.oauth_tokens.update({
+      where: { id: token.id },
+      data: {
+        accessToken: data.access_token,
+        expiresAt,
+        ...(data.refresh_token ? { refreshToken: data.refresh_token } : {}),
+        ...(data.scope ? { scopes: data.scope.split(' ') } : {}),
+        updatedAt: new Date(),
+      },
+    });
+
+    return data.access_token;
+  } catch {
+    return null;
+  }
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────
