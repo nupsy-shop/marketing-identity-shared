@@ -194,6 +194,63 @@ export async function tagSyntheticIdentity(userId: string, tag: string, realm = 
   await mergeUserAttributes(userId, { synthetic_identity_tag: [tag] }, realm);
 }
 
+// ─── User enable / disable / delete ───────────────────────────────────────
+
+/**
+ * Disable a Keycloak user (set enabled=false). User remains in the realm
+ * but cannot authenticate. Reversible via enableKeycloakUser.
+ */
+export async function disableKeycloakUser(realm: string, userId: string): Promise<void> {
+  const user = await getKeycloakUser(realm, userId);
+  if (!user) throw new Error(`Keycloak user ${userId} not found in realm ${realm}`);
+
+  const res = await adminFetch(realm, `/users/${userId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ ...user, enabled: false }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to disable Keycloak user (${res.status}): ${text}`);
+  }
+}
+
+/**
+ * Re-enable a previously disabled Keycloak user.
+ */
+export async function enableKeycloakUser(realm: string, userId: string): Promise<void> {
+  const user = await getKeycloakUser(realm, userId);
+  if (!user) throw new Error(`Keycloak user ${userId} not found in realm ${realm}`);
+
+  const res = await adminFetch(realm, `/users/${userId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ ...user, enabled: true }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to enable Keycloak user (${res.status}): ${text}`);
+  }
+}
+
+/**
+ * Hard-delete a Keycloak user from the realm. Irreversible.
+ * Used when a user is soft-deleted from the application database.
+ */
+export async function deleteKeycloakUser(realm: string, userId: string): Promise<void> {
+  const res = await adminFetch(realm, `/users/${userId}`, {
+    method: 'DELETE',
+  });
+
+  // 404 = already deleted, treat as success (idempotent)
+  if (res.status === 404) return;
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to delete Keycloak user (${res.status}): ${text}`);
+  }
+}
+
 // ─── SAML client verification ──────────────────────────────────────────────
 
 export async function verifySamlClient(
