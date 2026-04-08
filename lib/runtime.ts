@@ -25,17 +25,21 @@ export interface RuntimeServices {
   };
 }
 
-let _runtime: RuntimeServices | null = null;
+// Use globalThis to ensure a single instance across compiled modules.
+// When tsc compiles both src/ and shared/, each gets its own module scope.
+// globalThis is the only reliable shared state across module boundaries.
+const RUNTIME_KEY = Symbol.for('accesshive.runtime');
 
 export function setRuntime(services: RuntimeServices): void {
-  _runtime = services;
+  (globalThis as any)[RUNTIME_KEY] = services;
 }
 
 export function getRuntime(): RuntimeServices {
-  if (!_runtime) {
+  const runtime = (globalThis as any)[RUNTIME_KEY] as RuntimeServices | undefined;
+  if (!runtime) {
     throw new Error(
       'Runtime services not initialized. Call setRuntime({ prisma, logger }) before loading plugin processors.',
     );
   }
-  return _runtime;
+  return runtime;
 }
