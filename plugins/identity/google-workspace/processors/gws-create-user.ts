@@ -20,9 +20,7 @@ interface JobResult {
 
 export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   const { tenantId, identityId, email, displayName, platformKey } = job.data;
-  const runtime = getRuntime();
-  console.log('[GWS DEBUG] runtime keys:', Object.keys(runtime), 'prisma type:', typeof runtime.prisma, 'prisma truthy:', !!runtime.prisma);
-  const { prisma, logger } = runtime;
+  const { prisma, logger } = getRuntime();
 
   // 1. Load identity from DB — verify it still exists
   const identity = await prisma.integration_identities.findUnique({
