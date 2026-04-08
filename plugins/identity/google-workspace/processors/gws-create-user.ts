@@ -59,8 +59,8 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     const token = await prisma.oauth_tokens.findUnique({
       where: { id: source.oauth_token_id },
     });
-    if (token && token.is_active !== false) {
-      accessToken = token.access_token;
+    if (token && token.isActive !== false) {
+      accessToken = token.accessToken;
     }
   }
 
