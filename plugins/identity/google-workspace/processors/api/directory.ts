@@ -161,3 +161,71 @@ export async function fetchUser(accessToken: string, userKey: string): Promise<G
   const url = `${ADMIN_API_BASE}/users/${encodeURIComponent(userKey)}`;
   return apiFetch<GoogleUser>(url, accessToken);
 }
+
+/**
+ * List users in a domain, scoped to an optional orgUnitPath.
+ */
+export async function fetchUsers(
+  accessToken: string,
+  domain: string,
+  pageToken?: string,
+  maxResults: number = 200,
+  query?: string,
+): Promise<{ users?: GoogleUser[]; nextPageToken?: string }> {
+  const params = new URLSearchParams({ domain, maxResults: String(maxResults) });
+  if (pageToken) params.set('pageToken', pageToken);
+  if (query) params.set('query', query);
+  const url = `${ADMIN_API_BASE}/users?${params.toString()}`;
+  return apiFetch<{ users?: GoogleUser[]; nextPageToken?: string }>(url, accessToken);
+}
+
+// ─── Group Operations ──────────────────────────────────────────────────────
+
+export interface GoogleGroup {
+  id: string;
+  email: string;
+  name: string;
+  description?: string;
+  directMembersCount?: string;
+  adminCreated?: boolean;
+  [key: string]: unknown;
+}
+
+export interface GoogleMember {
+  id: string;
+  email: string;
+  role: 'OWNER' | 'MANAGER' | 'MEMBER';
+  type: 'USER' | 'GROUP' | 'CUSTOMER';
+  status?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * List groups in a Google Workspace domain.
+ */
+export async function fetchGroups(
+  accessToken: string,
+  domain: string,
+  pageToken?: string,
+  maxResults: number = 200,
+): Promise<{ groups?: GoogleGroup[]; nextPageToken?: string }> {
+  const params = new URLSearchParams({ domain, maxResults: String(maxResults) });
+  if (pageToken) params.set('pageToken', pageToken);
+  const url = `${ADMIN_API_BASE}/groups?${params.toString()}`;
+  return apiFetch<{ groups?: GoogleGroup[]; nextPageToken?: string }>(url, accessToken);
+}
+
+/**
+ * List members of a group (paginated).
+ */
+export async function fetchGroupMembers(
+  accessToken: string,
+  groupKey: string,
+  pageToken?: string,
+): Promise<{ members?: GoogleMember[]; nextPageToken?: string }> {
+  const params = new URLSearchParams();
+  if (pageToken) params.set('pageToken', pageToken);
+  const query = params.toString();
+  const url = `${ADMIN_API_BASE}/groups/${encodeURIComponent(groupKey)}/members${query ? `?${query}` : ''}`;
+  return apiFetch<{ members?: GoogleMember[]; nextPageToken?: string }>(url, accessToken);
+}
