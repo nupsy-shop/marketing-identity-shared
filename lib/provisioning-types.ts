@@ -11,6 +11,8 @@ export const IdentityType = {
   HUMAN_INTERACTIVE: 'HUMAN_INTERACTIVE',
   SERVICE_ACCOUNT: 'SERVICE_ACCOUNT',
   SHARED_CREDENTIAL: 'SHARED_CREDENTIAL',
+  API_KEY: 'API_KEY',
+  OAUTH_CLIENT: 'OAUTH_CLIENT',
 } as const;
 
 export type IdentityType = (typeof IdentityType)[keyof typeof IdentityType];
