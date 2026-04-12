@@ -38,16 +38,21 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
   const { prisma, logger } = getRuntime();
 
   // 1. Load GWS identity source for this agency
+  // Allow both 'connected' AND 'degraded' sources to attempt sync.
+  // A degraded source is one where a previous sync failed — the connection
+  // may still be valid (token works, scopes OK). Running sync again is the
+  // only way to recover from degraded → connected. Without this, a single
+  // transient failure permanently locks the source out of sync.
   const source = await prisma.identity_sources.findFirst({
     where: {
       agency_id: tenantId,
       plugin_key: 'google-workspace',
-      connection_state: 'connected',
+      connection_state: { in: ['connected', 'degraded'] },
     },
   });
 
   if (!source) {
-    logger.info('gws_sync_directory: no connected GWS source', { jobId: String(job.id), tenantId });
+    logger.info('gws_sync_directory: no connected/degraded GWS source', { jobId: String(job.id), tenantId });
     return { status: 'completed', jobType: 'gws_sync_directory', stats: { usersUpserted: 0, groupsUpserted: 0, membershipsProcessed: 0 } };
   }
 
@@ -415,7 +420,11 @@ async function resolveAccessToken(prisma: any, source: any): Promise<string | nu
   if (isExpired && token.refreshToken) {
     const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
     const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-    if (!clientId || !clientSecret) return token.accessToken;
+    if (!clientId || !clientSecret) {
+      const { logger: log } = getRuntime();
+      log.error('gws_sync_directory: GOOGLE_OAUTH_CLIENT_ID/SECRET not configured — cannot refresh token');
+      return null;
+    }
 
     try {
       const res = await fetch(GOOGLE_TOKEN_URL, {
@@ -429,7 +438,17 @@ async function resolveAccessToken(prisma: any, source: any): Promise<string | nu
         }),
       });
 
-      if (!res.ok) return token.accessToken;
+      if (!res.ok) {
+        let errorText = '';
+        try { errorText = await res.text(); } catch { /* ignore */ }
+        const { logger: log } = getRuntime();
+        log.error('gws_sync_directory: Google OAuth token refresh failed', {
+          tokenId: token.id,
+          status: res.status,
+          error: errorText,
+        });
+        return null;
+      }
 
       const data = await res.json();
       const newExpiresAt = data.expires_in
@@ -447,9 +466,17 @@ async function resolveAccessToken(prisma: any, source: any): Promise<string | nu
       });
 
       return data.access_token;
-    } catch {
-      return token.accessToken;
+    } catch (err) {
+      const { logger: log } = getRuntime();
+      log.error('gws_sync_directory: token refresh error', { error: (err as Error).message });
+      return null;
     }
+  }
+
+  if (isExpired && !token.refreshToken) {
+    const { logger: log } = getRuntime();
+    log.error('gws_sync_directory: token expired and no refresh token stored');
+    return null;
   }
 
   return token.accessToken;

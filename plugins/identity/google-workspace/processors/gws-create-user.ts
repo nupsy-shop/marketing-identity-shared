@@ -70,9 +70,16 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
         if (refreshed) {
           accessToken = refreshed;
         } else {
-          // Refresh failed — try existing token as last resort
-          accessToken = token.accessToken;
+          // Refresh failed — do NOT fall back to expired token.
+          // Using a stale token produces misleading 403 errors.
+          throw new Error(
+            'Google Workspace OAuth token refresh failed. The agency may need to reconnect Google Workspace in Settings → Identity Sources.'
+          );
         }
+      } else if (isExpired && !token.refreshToken) {
+        throw new Error(
+          'Google Workspace OAuth token expired and no refresh token is stored. The agency must reconnect Google Workspace in Settings → Identity Sources.'
+        );
       } else {
         accessToken = token.accessToken;
       }
@@ -196,6 +203,14 @@ async function refreshGoogleToken(
     });
 
     if (!res.ok) {
+      let errorText = '';
+      try { errorText = await res.text(); } catch { /* ignore */ }
+      const { logger: log } = getRuntime();
+      log.error('gws_create_user: Google OAuth token refresh failed', {
+        tokenId: token.id,
+        status: res.status,
+        error: errorText,
+      });
       return null;
     }
 
