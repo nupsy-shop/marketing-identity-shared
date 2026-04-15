@@ -98,10 +98,39 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
 
     // 3. Fetch and upsert users
     const seenExternalIds = new Set<string>();
+    const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
     const users = await fetchUsers(accessToken);
 
     for (const user of users) {
+      // Capture previous department/title for attribute-based mover detection
+      const existingUser = await prisma.directory_users.findFirst({
+        where: { source_id: sourceId, external_id: user.id },
+        select: { department: true, job_title: true },
+      });
       await upsertDirectoryUser(prisma, sourceId, tenantId, user);
+      // Track attribute changes for mover detection
+      if (existingUser) {
+        const newDept = user.department || null;
+        const newTitle = user.jobTitle || null;
+        if (existingUser.department !== newDept && (existingUser.department || newDept)) {
+          attributeChanges.push({
+            userExternalId: user.id,
+            userEmail: user.mail || user.userPrincipalName,
+            attribute: 'department',
+            oldValue: existingUser.department,
+            newValue: newDept,
+          });
+        }
+        if (existingUser.job_title !== newTitle && (existingUser.job_title || newTitle)) {
+          attributeChanges.push({
+            userExternalId: user.id,
+            userEmail: user.mail || user.userPrincipalName,
+            attribute: 'job_title',
+            oldValue: existingUser.job_title,
+            newValue: newTitle,
+          });
+        }
+      }
       seenExternalIds.add(user.id);
       stats.usersUpserted++;
     }
@@ -154,13 +183,18 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         last_sync_at: new Date(),
         last_sync_status: 'success',
         last_sync_error: null,
-        last_sync_stats: stats,
+        last_sync_stats: { ...stats, attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined },
         connection_state: 'connected',
         next_sync_at: new Date(Date.now() + (source.sync_interval_hours || 6) * 60 * 60 * 1000),
         updated_at: new Date(),
       },
     });
 
+    if (attributeChanges.length > 0) {
+      logger.info('entra_sync_directory: attribute changes detected', {
+        tenantId, sourceId, count: attributeChanges.length,
+      });
+    }
     logger.info('entra_sync_directory: sync completed', {
       jobId: String(job.id),
       tenantId,
