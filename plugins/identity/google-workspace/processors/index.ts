@@ -2,6 +2,7 @@ export default {
   gws_create_user: () => import('./gws-create-user.js'),
   gws_suspend_user: () => import('./gws-suspend-user.js'),
   gws_sync_directory: () => import('./gws-sync-directory.js'),
+  gws_poll_audit: () => import('./gws-poll-audit.js'),
 };
 
 // Max concurrent jobs per tenant for each job type.
@@ -11,4 +12,5 @@ export const concurrency = {
   gws_create_user: 1,
   gws_suspend_user: 1,
   gws_sync_directory: 1,
+  gws_poll_audit: 1,
 };
