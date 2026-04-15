@@ -23,6 +23,16 @@ export interface RuntimeServices {
     error(msg: string, ctx?: Record<string, unknown>): void;
     debug(msg: string, ctx?: Record<string, unknown>): void;
   };
+  /**
+   * Optional job enqueue callback provided by the host.
+   * Allows processors to dispatch follow-up jobs (e.g. jml_process_lifecycle)
+   * without coupling to the host's queue implementation.
+   *
+   * @param jobType - Job type identifier (e.g. 'jml_process_lifecycle')
+   * @param data - Job payload (must include tenantId for tenant-scoped jobs)
+   * @returns Job ID or null if unavailable
+   */
+  enqueueJob?: (jobType: string, data: Record<string, unknown>) => Promise<string | null>;
 }
 
 // Use globalThis to ensure a single instance across compiled modules.

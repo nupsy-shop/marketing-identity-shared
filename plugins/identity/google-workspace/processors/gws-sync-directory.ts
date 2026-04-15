@@ -90,6 +90,9 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
   let userPageToken: string | undefined;
   const seenUserEmails = new Set<string>();
   const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
+  const newJoiners: string[] = [];
+  const newSuspended: string[] = [];
+  const newUnsuspended: string[] = [];
 
   do {
     const page = await fetchUsers(accessToken, domain, userPageToken);
@@ -97,8 +100,23 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
       // Capture previous department/title for attribute-based mover detection
       const existingUser = await prisma.gws_directory_users.findFirst({
         where: { source_id: sourceId, email: user.primaryEmail },
-        select: { department: true, job_title: true },
+        select: { department: true, job_title: true, is_suspended: true },
       });
+      if (!existingUser) {
+        // New user not previously in directory — this is a joiner
+        if (!user.suspended) {
+          newJoiners.push(user.primaryEmail);
+        }
+      } else {
+        // Check suspension status change
+        const wasSuspended = (existingUser as any).is_suspended || false;
+        const nowSuspended = user.suspended || false;
+        if (!wasSuspended && nowSuspended) {
+          newSuspended.push(user.primaryEmail);
+        } else if (wasSuspended && !nowSuspended) {
+          newUnsuspended.push(user.primaryEmail);
+        }
+      }
       await upsertGwsUser(prisma, sourceId, tenantId, user);
       // Track attribute changes for mover detection
       if (existingUser) {
@@ -165,6 +183,8 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     select: { id: true, google_group_id: true },
   });
 
+  const groupChangesByUser = new Map<string, { added: string[]; removed: string[] }>();
+
   for (const group of groups) {
     const members: { userId: string; role: string; email: string }[] = [];
     let memberPageToken: string | undefined;
@@ -178,7 +198,16 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
       memberPageToken = page.nextPageToken;
     } while (memberPageToken);
 
-    await syncGwsMemberships(prisma, group.id, tenantId, members);
+    const membershipChanges = await syncGwsMemberships(prisma, group.id, tenantId, members);
+    // Aggregate group changes by user email
+    for (const email of membershipChanges.added) {
+      if (!groupChangesByUser.has(email)) groupChangesByUser.set(email, { added: [], removed: [] });
+      groupChangesByUser.get(email)!.added.push(group.id);
+    }
+    for (const email of membershipChanges.removed) {
+      if (!groupChangesByUser.has(email)) groupChangesByUser.set(email, { added: [], removed: [] });
+      groupChangesByUser.get(email)!.removed.push(group.id);
+    }
     stats.membershipsProcessed += members.length;
   }
 
@@ -259,6 +288,57 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
       ...stats,
     },
   }).catch(() => {});
+
+  // 9. Enqueue JML lifecycle processing if there are events to process
+  const { enqueueJob } = getRuntime();
+  const leaverEmails = toDeactivate.length > 0
+    ? allActiveGws.filter((u: any) => toDeactivate.includes(u.id)).map((u: any) => u.email)
+    : [];
+  const groupChanges = Array.from(groupChangesByUser.entries()).map(([email, changes]) => ({
+    userExternalId: email,
+    userEmail: email,
+    added: changes.added,
+    removed: changes.removed,
+  }));
+
+  const hasLifecycleEvents =
+    newJoiners.length > 0 ||
+    leaverEmails.length > 0 ||
+    newSuspended.length > 0 ||
+    newUnsuspended.length > 0 ||
+    groupChanges.length > 0 ||
+    attributeChanges.length > 0;
+
+  if (enqueueJob && hasLifecycleEvents) {
+    await enqueueJob('jml_process_lifecycle', {
+      tenantId,
+      sourceId,
+      pluginKey: 'google-workspace',
+      triggeredBy: `gws_sync_directory:${job.id}`,
+      lifecycleEvents: {
+        joiners: newJoiners.length > 0 ? newJoiners : undefined,
+        leavers: leaverEmails.length > 0 ? leaverEmails : undefined,
+        suspended: newSuspended.length > 0 ? newSuspended : undefined,
+        unsuspended: newUnsuspended.length > 0 ? newUnsuspended : undefined,
+        groupChanges: groupChanges.length > 0 ? groupChanges : undefined,
+        attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined,
+      },
+    }).catch((err: Error) => {
+      logger.error('gws_sync_directory: failed to enqueue jml_process_lifecycle', {
+        tenantId, sourceId, error: err.message,
+      });
+    });
+
+    logger.info('gws_sync_directory: enqueued jml_process_lifecycle', {
+      tenantId, sourceId,
+      joiners: newJoiners.length,
+      leavers: leaverEmails.length,
+      suspended: newSuspended.length,
+      unsuspended: newUnsuspended.length,
+      groupChanges: groupChanges.length,
+      attributeChanges: attributeChanges.length,
+    });
+  }
 
   return { status: 'completed', jobType: 'gws_sync_directory', stats };
 
@@ -400,13 +480,14 @@ async function syncGwsMemberships(
   groupDbId: string,
   agencyId: string,
   members: { userId: string; role: string; email: string }[],
-): Promise<void> {
+): Promise<{ added: string[]; removed: string[] }> {
   const existing = await prisma.gws_group_members.findMany({
     where: { group_id: groupDbId },
     select: { id: true, user_email: true },
   });
   const existingMap = new Map(existing.map((e: any) => [e.user_email, e.id]));
   const seenEmails = new Set<string>();
+  const addedEmails: string[] = [];
 
   for (const member of members) {
     seenEmails.add(member.email);
@@ -426,14 +507,19 @@ async function syncGwsMemberships(
           last_synced_at: new Date(),
         },
       });
+      addedEmails.push(member.email);
     }
   }
 
   // Remove members no longer in group
-  const removedIds = existing.filter((e: any) => !seenEmails.has(e.user_email)).map((e: any) => e.id);
+  const removedMembers = existing.filter((e: any) => !seenEmails.has(e.user_email));
+  const removedIds = removedMembers.map((e: any) => e.id);
+  const removedEmails = removedMembers.map((e: any) => e.user_email);
   if (removedIds.length > 0) {
     await prisma.gws_group_members.deleteMany({ where: { id: { in: removedIds } } });
   }
+
+  return { added: addedEmails, removed: removedEmails };
 }
 
 async function autoLinkByEmail(prisma: any, sourceId: string): Promise<void> {

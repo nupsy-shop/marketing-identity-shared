@@ -99,14 +99,34 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     // 3. Fetch and upsert users
     const seenExternalIds = new Set<string>();
     const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
+    const newJoiners: string[] = [];
+    const newSuspended: string[] = [];
+    const newUnsuspended: string[] = [];
     const users = await fetchUsers(accessToken);
 
     for (const user of users) {
       // Capture previous department/title for attribute-based mover detection
       const existingUser = await prisma.directory_users.findFirst({
         where: { source_id: sourceId, external_id: user.id },
-        select: { department: true, job_title: true },
+        select: { department: true, job_title: true, is_suspended: true },
       });
+
+      if (!existingUser) {
+        // New user — joiner (if account is enabled)
+        if (user.accountEnabled !== false) {
+          newJoiners.push(user.id);
+        }
+      } else {
+        // Check suspension status change
+        const wasSuspended = (existingUser as any).is_suspended || false;
+        const nowSuspended = user.accountEnabled === false;
+        if (!wasSuspended && nowSuspended) {
+          newSuspended.push(user.id);
+        } else if (wasSuspended && !nowSuspended) {
+          newUnsuspended.push(user.id);
+        }
+      }
+
       await upsertDirectoryUser(prisma, sourceId, tenantId, user);
       // Track attribute changes for mover detection
       if (existingUser) {
@@ -167,9 +187,19 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       select: { id: true, external_id: true },
     });
 
+    const groupChangesByUser = new Map<string, { added: string[]; removed: string[] }>();
+
     for (const dbGroup of activeGroups) {
       const members = await fetchGroupMembers(accessToken, dbGroup.external_id);
-      await syncMemberships(prisma, sourceId, dbGroup.id, tenantId, members);
+      const membershipChanges = await syncMemberships(prisma, sourceId, dbGroup.id, tenantId, members);
+      for (const externalId of membershipChanges.added) {
+        if (!groupChangesByUser.has(externalId)) groupChangesByUser.set(externalId, { added: [], removed: [] });
+        groupChangesByUser.get(externalId)!.added.push(dbGroup.id);
+      }
+      for (const externalId of membershipChanges.removed) {
+        if (!groupChangesByUser.has(externalId)) groupChangesByUser.set(externalId, { added: [], removed: [] });
+        groupChangesByUser.get(externalId)!.removed.push(dbGroup.id);
+      }
       stats.membershipsProcessed += members.length;
     }
 
@@ -217,6 +247,57 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         ...stats,
       },
     }).catch(() => {});
+
+    // 10. Enqueue JML lifecycle processing if there are events to process
+    const { enqueueJob } = getRuntime();
+    const leaverExternalIds = toDeactivate.length > 0
+      ? allActiveUsers.filter((u: any) => toDeactivate.includes(u.id)).map((u: any) => u.external_id)
+      : [];
+    const groupChanges = Array.from(groupChangesByUser.entries()).map(([externalId, changes]) => ({
+      userExternalId: externalId,
+      userEmail: users.find(u => u.id === externalId)?.mail || users.find(u => u.id === externalId)?.userPrincipalName || '',
+      added: changes.added,
+      removed: changes.removed,
+    }));
+
+    const hasLifecycleEvents =
+      newJoiners.length > 0 ||
+      leaverExternalIds.length > 0 ||
+      newSuspended.length > 0 ||
+      newUnsuspended.length > 0 ||
+      groupChanges.length > 0 ||
+      attributeChanges.length > 0;
+
+    if (enqueueJob && hasLifecycleEvents) {
+      await enqueueJob('jml_process_lifecycle', {
+        tenantId,
+        sourceId,
+        pluginKey: 'entra-id',
+        triggeredBy: `entra_sync_directory:${job.id}`,
+        lifecycleEvents: {
+          joiners: newJoiners.length > 0 ? newJoiners : undefined,
+          leavers: leaverExternalIds.length > 0 ? leaverExternalIds : undefined,
+          suspended: newSuspended.length > 0 ? newSuspended : undefined,
+          unsuspended: newUnsuspended.length > 0 ? newUnsuspended : undefined,
+          groupChanges: groupChanges.length > 0 ? groupChanges : undefined,
+          attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined,
+        },
+      }).catch((err: Error) => {
+        logger.error('entra_sync_directory: failed to enqueue jml_process_lifecycle', {
+          tenantId, sourceId, error: err.message,
+        });
+      });
+
+      logger.info('entra_sync_directory: enqueued jml_process_lifecycle', {
+        tenantId, sourceId,
+        joiners: newJoiners.length,
+        leavers: leaverExternalIds.length,
+        suspended: newSuspended.length,
+        unsuspended: newUnsuspended.length,
+        groupChanges: groupChanges.length,
+        attributeChanges: attributeChanges.length,
+      });
+    }
 
     return { status: 'completed', jobType: 'entra_sync_directory', stats };
   } catch (err) {
@@ -357,9 +438,10 @@ async function syncMemberships(
   groupDbId: string,
   agencyId: string,
   members: EntraMember[],
-): Promise<void> {
+): Promise<{ added: string[]; removed: string[] }> {
   // Build a set of directory_user DB IDs for members that exist in our table
   const seenUserDbIds = new Set<string>();
+  const addedExternalIds: string[] = [];
 
   for (const member of members) {
     const dbUser = await prisma.directory_users.findUnique({
@@ -369,6 +451,11 @@ async function syncMemberships(
 
     if (!dbUser) continue; // User not synced yet — skip
     seenUserDbIds.add(dbUser.id);
+
+    const existingMembership = await prisma.directory_memberships.findUnique({
+      where: { user_id_group_id: { user_id: dbUser.id, group_id: groupDbId } },
+      select: { id: true },
+    });
 
     await prisma.directory_memberships.upsert({
       where: { user_id_group_id: { user_id: dbUser.id, group_id: groupDbId } },
@@ -384,6 +471,10 @@ async function syncMemberships(
         last_synced_at: new Date(),
       },
     });
+
+    if (!existingMembership) {
+      addedExternalIds.push(member.id);
+    }
   }
 
   // Remove memberships for users no longer in the group
@@ -392,6 +483,20 @@ async function syncMemberships(
     select: { id: true, user_id: true },
   });
 
+  const removedUserDbIds = existingMemberships
+    .filter((m: { id: string; user_id: string }) => !seenUserDbIds.has(m.user_id))
+    .map((m: { id: string; user_id: string }) => m.user_id);
+
+  // Look up external IDs of removed users
+  const removedExternalIds: string[] = [];
+  if (removedUserDbIds.length > 0) {
+    const removedUsers = await prisma.directory_users.findMany({
+      where: { id: { in: removedUserDbIds } },
+      select: { external_id: true },
+    });
+    removedExternalIds.push(...removedUsers.map((u: any) => u.external_id));
+  }
+
   const removedIds = existingMemberships
     .filter((m: { id: string; user_id: string }) => !seenUserDbIds.has(m.user_id))
     .map((m: { id: string }) => m.id);
@@ -399,6 +504,8 @@ async function syncMemberships(
   if (removedIds.length > 0) {
     await prisma.directory_memberships.deleteMany({ where: { id: { in: removedIds } } });
   }
+
+  return { added: addedExternalIds, removed: removedExternalIds };
 }
 
 async function autoLinkByEmail(prisma: any, sourceId: string): Promise<void> {
