@@ -29,7 +29,7 @@ export default async function iamProvisionAppUser(job: Bull.Job): Promise<JobRes
   const { tenantId, userId, email, displayName, givenName, familyName, tempPassword } = job.data;
 
   if (!isKeycloakAdminConfigured()) {
-    logger.warn({ jobId: job.id, tenantId }, 'Keycloak admin not configured, skipping');
+    logger.warn('Keycloak admin not configured, skipping', { jobId: job.id, tenantId });
     return { status: 'completed', jobType: 'iam_provision_app_user' };
   }
 
@@ -42,7 +42,7 @@ export default async function iamProvisionAppUser(job: Bull.Job): Promise<JobRes
   });
 
   if (!user) {
-    logger.warn({ jobId: job.id, tenantId, userId }, 'Local directory user not found, skipping');
+    logger.warn('Local directory user not found, skipping', { jobId: job.id, tenantId, userId });
     return { status: 'completed', jobType: 'iam_provision_app_user' };
   }
 
@@ -83,15 +83,15 @@ export default async function iamProvisionAppUser(job: Bull.Job): Promise<JobRes
         await sendKeycloakActionsEmail(realm, keycloakUser.id, ['UPDATE_PASSWORD']);
       } catch (emailErr) {
         logger.warn(
-          { jobId: job.id, userId, err: (emailErr as Error).message },
           'Failed to send activation email — user created but needs manual password reset',
+          { jobId: job.id, userId, err: (emailErr as Error).message },
         );
       }
     }
 
     logger.info(
-      { jobId: job.id, tenantId, userId, email: email || user.email, keycloakUserId: keycloakUser.id },
       'App user provisioned in Keycloak',
+      { jobId: job.id, tenantId, userId, email: email || user.email, keycloakUserId: keycloakUser.id },
     );
   } catch (err) {
     await prisma.local_directory_users.update({

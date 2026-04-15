@@ -23,7 +23,7 @@ export default async function iamDeprovisionAppUser(job: Bull.Job): Promise<JobR
   const { tenantId, userId } = job.data;
 
   if (!isKeycloakAdminConfigured()) {
-    logger.warn({ jobId: job.id, tenantId }, 'Keycloak admin not configured, skipping');
+    logger.warn('Keycloak admin not configured, skipping', { jobId: job.id, tenantId });
     return { status: 'completed', jobType: 'iam_deprovision_app_user' };
   }
 
@@ -36,7 +36,7 @@ export default async function iamDeprovisionAppUser(job: Bull.Job): Promise<JobR
   });
 
   if (!user) {
-    logger.warn({ jobId: job.id, tenantId, userId }, 'Local directory user not found, skipping');
+    logger.warn('Local directory user not found, skipping', { jobId: job.id, tenantId, userId });
     return { status: 'completed', jobType: 'iam_deprovision_app_user' };
   }
 
@@ -71,8 +71,8 @@ export default async function iamDeprovisionAppUser(job: Bull.Job): Promise<JobR
   });
 
   logger.info(
-    { jobId: job.id, tenantId, userId, keycloakUserId: user.keycloak_user_id },
     'App user deprovisioned from Keycloak',
+    { jobId: job.id, tenantId, userId, keycloakUserId: user.keycloak_user_id },
   );
 
   return { status: 'completed', jobType: 'iam_deprovision_app_user' };

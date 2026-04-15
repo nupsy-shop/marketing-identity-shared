@@ -12,7 +12,7 @@ export default async function keycloakUpdateUser(job: Bull.Job): Promise<JobResu
   const { tenantId, realm, keycloakUserId, updates, attributes } = job.data;
 
   if (!isKeycloakAdminConfigured()) {
-    logger.warn({ jobId: job.id, tenantId }, 'Keycloak admin not configured, skipping update');
+    logger.warn('Keycloak admin not configured, skipping update', { jobId: job.id, tenantId });
     return { status: 'completed', jobType: 'iam_update_identity' };
   }
 
@@ -37,6 +37,6 @@ export default async function keycloakUpdateUser(job: Bull.Job): Promise<JobResu
     await mergeUserAttributes(keycloakUserId, attributes, realm);
   }
 
-  logger.info({ jobId: job.id, tenantId, keycloakUserId }, 'Keycloak user updated');
+  logger.info('Keycloak user updated', { jobId: job.id, tenantId, keycloakUserId });
   return { status: 'completed', jobType: 'iam_update_identity' };
 }

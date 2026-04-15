@@ -29,12 +29,12 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
   const { tenantId, identityId } = job.data;
 
   if (!isKeycloakAdminConfigured()) {
-    logger.warn({ jobId: job.id, tenantId }, 'Keycloak admin not configured, skipping');
+    logger.warn('Keycloak admin not configured, skipping', { jobId: job.id, tenantId });
     return { status: 'completed', jobType: 'iam_provision_identity' };
   }
 
   if (!identityId) {
-    logger.warn({ jobId: job.id, tenantId }, 'No identityId provided, skipping');
+    logger.warn('No identityId provided, skipping', { jobId: job.id, tenantId });
     return { status: 'completed', jobType: 'iam_provision_identity' };
   }
 
@@ -43,7 +43,7 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
   });
 
   if (!identity) {
-    logger.warn({ jobId: job.id, tenantId, identityId }, 'Identity not found — already deleted, skipping');
+    logger.warn('Identity not found — already deleted, skipping', { jobId: job.id, tenantId, identityId });
     return { status: 'completed', jobType: 'iam_provision_identity' };
   }
 
@@ -70,8 +70,8 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
     await reconcileProvisioningStatus(prisma, identityId);
 
     logger.info(
-      { jobId: job.id, tenantId, identityId, identityType },
       'Dedicated identity Keycloak provisioning skipped (SHARED_CREDENTIAL)',
+      { jobId: job.id, tenantId, identityId, identityType },
     );
     return { status: 'completed', jobType: 'iam_provision_identity' };
   }
@@ -111,8 +111,8 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
     await reconcileProvisioningStatus(prisma, identityId);
 
     logger.info(
-      { jobId: job.id, tenantId, identityId, keycloakUserId: keycloakUser.id },
       'Dedicated identity provisioned in Keycloak',
+      { jobId: job.id, tenantId, identityId, keycloakUserId: keycloakUser.id },
     );
   } catch (err) {
     await prisma.integration_identities.update({

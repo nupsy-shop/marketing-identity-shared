@@ -23,7 +23,7 @@ export default async function iamEnableAppUser(job: Bull.Job): Promise<JobResult
   const { tenantId, userId } = job.data;
 
   if (!isKeycloakAdminConfigured()) {
-    logger.warn({ jobId: job.id, tenantId }, 'Keycloak admin not configured, skipping');
+    logger.warn('Keycloak admin not configured, skipping', { jobId: job.id, tenantId });
     return { status: 'completed', jobType: 'iam_enable_app_user' };
   }
 
@@ -36,12 +36,12 @@ export default async function iamEnableAppUser(job: Bull.Job): Promise<JobResult
   });
 
   if (!user) {
-    logger.warn({ jobId: job.id, tenantId, userId }, 'Local directory user not found, skipping');
+    logger.warn('Local directory user not found, skipping', { jobId: job.id, tenantId, userId });
     return { status: 'completed', jobType: 'iam_enable_app_user' };
   }
 
   if (!user.keycloak_user_id) {
-    logger.warn({ jobId: job.id, tenantId, userId }, 'User has no keycloak_user_id, skipping');
+    logger.warn('User has no keycloak_user_id, skipping', { jobId: job.id, tenantId, userId });
     return { status: 'completed', jobType: 'iam_enable_app_user' };
   }
 
@@ -70,8 +70,8 @@ export default async function iamEnableAppUser(job: Bull.Job): Promise<JobResult
   });
 
   logger.info(
-    { jobId: job.id, tenantId, userId, keycloakUserId: user.keycloak_user_id },
     'App user re-enabled in Keycloak',
+    { jobId: job.id, tenantId, userId, keycloakUserId: user.keycloak_user_id },
   );
 
   return { status: 'completed', jobType: 'iam_enable_app_user' };

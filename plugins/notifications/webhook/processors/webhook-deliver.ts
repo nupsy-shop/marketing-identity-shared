@@ -40,6 +40,6 @@ export default async function webhookDeliver(job: Bull.Job): Promise<JobResult> 
     throw new Error(`Webhook delivery failed (${res.status}): ${text.substring(0, 200)}`);
   }
 
-  logger.info({ jobId: job.id, tenantId, webhookUrl, status: res.status }, 'Webhook delivered');
+  logger.info('Webhook delivered', { jobId: job.id, tenantId, webhookUrl, status: res.status });
   return { status: 'completed', jobType: 'webhook_deliver' };
 }

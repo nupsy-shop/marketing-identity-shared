@@ -30,6 +30,6 @@ export default async function slackNotify(job: Bull.Job): Promise<JobResult> {
     throw new Error(`Slack notification failed (${res.status}): ${text.substring(0, 200)}`);
   }
 
-  logger.info({ jobId: job.id, tenantId, channel }, 'Slack notification sent');
+  logger.info('Slack notification sent', { jobId: job.id, tenantId, channel });
   return { status: 'completed', jobType: 'slack_notify' };
 }
