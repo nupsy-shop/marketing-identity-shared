@@ -16,10 +16,9 @@ export default async function emailSend(job: Bull.Job): Promise<JobResult> {
 
   // TODO: Wire to actual email provider (SES, SendGrid, etc.)
   // For now, log the intent — email provider integration is not yet configured.
-  logger.info(
-    { jobId: job.id, tenantId, to, templateId, replyTo },
-    'Email send requested (no provider configured)',
-  );
+  logger.info('Email send requested (no provider configured)', {
+    jobId: job.id, tenantId, to, templateId, replyTo,
+  });
 
   return { status: 'completed', jobType: 'email_send' };
 }
