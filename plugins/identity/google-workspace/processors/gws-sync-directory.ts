@@ -2,7 +2,8 @@
  * GWS Sync Directory — Plugin Processor
  *
  * Processes gws_sync_directory Bull jobs. Syncs users, groups, and
- * memberships from Google Workspace into the canonical directory tables.
+ * memberships from Google Workspace into the GWS-specific source tables
+ * (gws_directory_users, gws_groups, gws_group_members).
  *
  * This processor handles the full directory sync that was previously
  * only triggered via the web app's sync-engine. Running it as a job
@@ -87,44 +88,51 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
 
   // 4. Sync users (paginated)
   let userPageToken: string | undefined;
-  const seenUserExternalIds = new Set<string>();
+  const seenUserEmails = new Set<string>();
 
   do {
     const page = await fetchUsers(accessToken, domain, userPageToken);
     for (const user of page.users ?? []) {
-      await upsertDirectoryUser(prisma, sourceId, tenantId, user);
-      seenUserExternalIds.add(user.id);
+      await upsertGwsUser(prisma, sourceId, tenantId, user);
+      seenUserEmails.add(user.primaryEmail);
       stats.usersUpserted++;
     }
     userPageToken = page.nextPageToken;
   } while (userPageToken);
 
   // Mark users not seen as inactive
-  await prisma.directory_users.updateMany({
-    where: {
-      source_id: sourceId,
-      is_active: true,
-      external_id: { notIn: Array.from(seenUserExternalIds) },
-    },
-    data: { is_active: false, updated_at: new Date() },
+  const allActiveGws = await prisma.gws_directory_users.findMany({
+    where: { source_id: sourceId, is_active: true },
+    select: { id: true, email: true },
   });
+  const toDeactivate = allActiveGws
+    .filter((u: any) => !seenUserEmails.has(u.email))
+    .map((u: any) => u.id);
+  if (toDeactivate.length > 0) {
+    await prisma.gws_directory_users.updateMany({
+      where: { id: { in: toDeactivate } },
+      data: { is_active: false, updated_at: new Date() },
+    });
+  }
 
   // 5. Sync groups (paginated)
   let groupPageToken: string | undefined;
+  const groupDbIds = new Map<string, string>(); // googleGroupId -> dbId
 
   do {
     const page = await fetchGroups(accessToken, domain, groupPageToken);
     for (const group of page.groups ?? []) {
-      await upsertDirectoryGroup(prisma, sourceId, tenantId, group);
+      const groupDbId = await upsertGwsGroup(prisma, sourceId, tenantId, group);
+      groupDbIds.set(group.id, groupDbId);
       stats.groupsUpserted++;
     }
     groupPageToken = page.nextPageToken;
   } while (groupPageToken);
 
   // 6. Sync memberships for each group
-  const groups = await prisma.directory_groups.findMany({
+  const groups = await prisma.gws_groups.findMany({
     where: { source_id: sourceId, is_active: true },
-    select: { id: true, external_id: true },
+    select: { id: true, google_group_id: true },
   });
 
   for (const group of groups) {
@@ -132,7 +140,7 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     let memberPageToken: string | undefined;
 
     do {
-      const page = await fetchGroupMembers(accessToken, group.external_id, memberPageToken);
+      const page = await fetchGroupMembers(accessToken, group.google_group_id, memberPageToken);
       const userMembers = (page.members ?? []).filter((m: GoogleMember) => m.type === 'USER');
       for (const m of userMembers) {
         members.push({ userId: m.id, role: m.role, email: m.email });
@@ -140,8 +148,47 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
       memberPageToken = page.nextPageToken;
     } while (memberPageToken);
 
-    await syncMemberships(prisma, sourceId, group.id, group.external_id, members);
+    await syncGwsMemberships(prisma, group.id, tenantId, members);
     stats.membershipsProcessed += members.length;
+  }
+
+  // 6.5 RBAC Drift Detection — find mappings referencing deleted GWS groups
+  const activeGwsGroupIds = (await prisma.gws_groups.findMany({
+    where: { source_id: sourceId, is_active: true },
+    select: { id: true },
+  })).map((g: any) => g.id);
+
+  const staleMappings = await prisma.idp_role_mappings.findMany({
+    where: {
+      agency_id: tenantId,
+      source_type: 'gws',
+      source_group_id: { notIn: activeGwsGroupIds },
+      is_active: true,
+    },
+    select: { id: true, role: true, source_group_id: true },
+  });
+
+  if (staleMappings.length > 0) {
+    logger.warn('gws_sync_directory: RBAC drift detected — stale group mappings', {
+      tenantId, sourceId,
+      staleMappings: staleMappings.map((m: any) => ({ id: m.id, role: m.role, groupId: m.source_group_id })),
+    });
+
+    // Mark stale mappings as inactive
+    await prisma.idp_role_mappings.updateMany({
+      where: { id: { in: staleMappings.map((m: any) => m.id) } },
+      data: { is_active: false, updated_at: new Date() },
+    });
+
+    publishAuditEvent({
+      eventType: 'rbac.drift.detected',
+      source: 'gws_sync_directory',
+      severity: 'warning',
+      actor: { id: null, type: 'system' },
+      agency: { id: tenantId },
+      resource: { type: 'idp_role_mappings', id: sourceId },
+      context: { staleMappingCount: staleMappings.length, staleMappings },
+    }).catch(() => {});
   }
 
   // 7. Auto-link directory users to app users by email
@@ -216,174 +263,160 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
 
 // ─── DB Helpers ─────────────────────────────────────────────────────────────
 
-async function upsertDirectoryUser(
+async function upsertGwsUser(
   prisma: any,
   sourceId: string,
   agencyId: string,
   user: GoogleUser,
 ): Promise<void> {
-  await prisma.directory_users.upsert({
-    where: { source_id_external_id: { source_id: sourceId, external_id: user.id } },
+  const now = new Date();
+  await prisma.gws_directory_users.upsert({
+    where: { source_id_email: { source_id: sourceId, email: user.primaryEmail } },
     create: {
       id: crypto.randomUUID(),
       source_id: sourceId,
       agency_id: agencyId,
-      external_id: user.id,
       email: user.primaryEmail,
       display_name: user.name?.fullName || user.primaryEmail,
       given_name: user.name?.givenName || null,
       family_name: user.name?.familyName || null,
       is_suspended: user.suspended || false,
       is_active: true,
-      avatar_url: user.thumbnailPhotoUrl || null,
+      google_id: user.id,
+      org_unit_path: user.orgUnitPath || null,
+      thumbnail_photo_url: user.thumbnailPhotoUrl || null,
+      primary_email: user.primaryEmail,
+      aliases: user.aliases || null,
+      last_login_time: user.lastLoginTime ? new Date(user.lastLoginTime) : null,
+      creation_time: user.creationTime ? new Date(user.creationTime) : null,
+      is_admin: user.isAdmin || false,
+      is_delegated_admin: user.isDelegatedAdmin || false,
       raw_attributes: user as any,
-      created_at: new Date(),
-      updated_at: new Date(),
+      last_synced_at: now,
+      created_at: now,
+      updated_at: now,
     },
     update: {
-      email: user.primaryEmail,
       display_name: user.name?.fullName || user.primaryEmail,
       given_name: user.name?.givenName || null,
       family_name: user.name?.familyName || null,
       is_suspended: user.suspended || false,
       is_active: true,
-      avatar_url: user.thumbnailPhotoUrl || null,
+      google_id: user.id,
+      org_unit_path: user.orgUnitPath || null,
+      thumbnail_photo_url: user.thumbnailPhotoUrl || null,
+      primary_email: user.primaryEmail,
+      aliases: user.aliases || null,
+      last_login_time: user.lastLoginTime ? new Date(user.lastLoginTime) : null,
+      is_admin: user.isAdmin || false,
+      is_delegated_admin: user.isDelegatedAdmin || false,
       raw_attributes: user as any,
-      updated_at: new Date(),
+      last_synced_at: now,
+      updated_at: now,
     },
   });
 }
 
-async function upsertDirectoryGroup(
+async function upsertGwsGroup(
   prisma: any,
   sourceId: string,
   agencyId: string,
   group: GoogleGroup,
-): Promise<void> {
-  await prisma.directory_groups.upsert({
-    where: { source_id_external_id: { source_id: sourceId, external_id: group.id } },
+): Promise<string> {
+  const now = new Date();
+  const row = await prisma.gws_groups.upsert({
+    where: { source_id_google_group_id: { source_id: sourceId, google_group_id: group.id } },
     create: {
       id: crypto.randomUUID(),
       source_id: sourceId,
       agency_id: agencyId,
-      external_id: group.id,
-      display_name: group.name,
+      google_group_id: group.id,
       email: group.email,
+      display_name: group.name,
       description: group.description || null,
       member_count: parseInt(group.directMembersCount || '0', 10),
-      group_type: group.adminCreated ? 'admin' : 'user',
       is_active: true,
       raw_attributes: group as any,
-      created_at: new Date(),
-      updated_at: new Date(),
+      created_at: now,
+      updated_at: now,
     },
     update: {
       display_name: group.name,
       email: group.email,
       description: group.description || null,
       member_count: parseInt(group.directMembersCount || '0', 10),
-      group_type: group.adminCreated ? 'admin' : 'user',
       is_active: true,
       raw_attributes: group as any,
-      updated_at: new Date(),
+      updated_at: now,
     },
   });
+  return row.id;
 }
 
-async function syncMemberships(
+async function syncGwsMemberships(
   prisma: any,
-  sourceId: string,
   groupDbId: string,
-  groupExternalId: string,
+  agencyId: string,
   members: { userId: string; role: string; email: string }[],
 ): Promise<void> {
-  // Get existing memberships for this group
-  const existing = await prisma.directory_memberships.findMany({
+  const existing = await prisma.gws_group_members.findMany({
     where: { group_id: groupDbId },
-    select: { id: true, user_external_id: true },
+    select: { id: true, user_email: true },
   });
-  const existingMap = new Map(existing.map((e: any) => [e.user_external_id, e.id]));
-
-  const seenExternalIds = new Set<string>();
+  const existingMap = new Map(existing.map((e: any) => [e.user_email, e.id]));
+  const seenEmails = new Set<string>();
 
   for (const member of members) {
-    seenExternalIds.add(member.userId);
-
-    // Resolve directory user by external ID
-    const dirUser = await prisma.directory_users.findFirst({
-      where: { source_id: sourceId, external_id: member.userId },
-      select: { id: true },
-    });
-
-    if (existingMap.has(member.userId)) {
-      // Update existing membership
-      await prisma.directory_memberships.update({
-        where: { id: existingMap.get(member.userId) },
-        data: {
-          role: member.role,
-          user_id: dirUser?.id || null,
-          is_active: true,
-          updated_at: new Date(),
-        },
+    seenEmails.add(member.email);
+    if (existingMap.has(member.email)) {
+      await prisma.gws_group_members.update({
+        where: { id: existingMap.get(member.email) },
+        data: { membership_role: member.role, last_synced_at: new Date() },
       });
     } else {
-      // Create new membership
-      await prisma.directory_memberships.create({
+      await prisma.gws_group_members.create({
         data: {
           id: crypto.randomUUID(),
           group_id: groupDbId,
-          user_external_id: member.userId,
-          user_id: dirUser?.id || null,
-          email: member.email,
-          role: member.role,
-          is_active: true,
-          created_at: new Date(),
-          updated_at: new Date(),
+          user_email: member.email,
+          membership_role: member.role,
+          agency_id: agencyId,
+          last_synced_at: new Date(),
         },
       });
     }
   }
 
-  // Mark memberships not seen as inactive
-  const removedIds = existing
-    .filter((e: any) => !seenExternalIds.has(e.user_external_id))
-    .map((e: any) => e.id);
-
+  // Remove members no longer in group
+  const removedIds = existing.filter((e: any) => !seenEmails.has(e.user_email)).map((e: any) => e.id);
   if (removedIds.length > 0) {
-    await prisma.directory_memberships.updateMany({
-      where: { id: { in: removedIds } },
-      data: { is_active: false, updated_at: new Date() },
-    });
+    await prisma.gws_group_members.deleteMany({ where: { id: { in: removedIds } } });
   }
 }
 
 async function autoLinkByEmail(prisma: any, sourceId: string): Promise<void> {
-  // Find directory users without an identity link, match by email to app users
-  const unlinked = await prisma.directory_users.findMany({
-    where: {
-      source_id: sourceId,
-      is_active: true,
-      identity_links: { none: { is_active: true } },
-    },
+  const unlinked = await prisma.gws_directory_users.findMany({
+    where: { source_id: sourceId, is_active: true },
     select: { id: true, email: true },
   });
 
-  for (const dirUser of unlinked) {
+  for (const gwsUser of unlinked) {
     const appUser = await prisma.users.findFirst({
-      where: { email: dirUser.email, is_active: true },
+      where: { email: gwsUser.email, is_active: true },
       select: { id: true },
     });
 
     if (appUser) {
       const existingLink = await prisma.identity_links.findFirst({
-        where: { directory_user_id: dirUser.id, app_user_id: appUser.id },
+        where: { directory_user_email: gwsUser.email, app_user_id: appUser.id },
       });
 
       if (!existingLink) {
         await prisma.identity_links.create({
           data: {
             id: crypto.randomUUID(),
-            directory_user_id: dirUser.id,
+            directory_user_id: gwsUser.id, // Still needed during migration
+            directory_user_email: gwsUser.email,
             app_user_id: appUser.id,
             is_active: true,
             link_method: 'email_match',
