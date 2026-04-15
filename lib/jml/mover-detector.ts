@@ -97,21 +97,26 @@ export async function detectMoverTransitions(
 
     // Check removed groups against client_group_bindings
     for (const groupId of change.removed) {
-      const binding = await prisma.client_group_bindings?.findFirst({
+      const binding = await prisma.client_group_bindings.findFirst({
         where: {
           directory_group_id: groupId,
           agency_id: agencyId,
           is_active: true,
         },
-        select: { client_id: true, clients: { select: { name: true } } },
-      }).catch(() => null);
+        select: { client_id: true },
+      });
 
       if (binding) {
         matched = true;
+        // Resolve client name via separate lookup (no relation on client_group_bindings)
+        const client = await prisma.clients.findUnique({
+          where: { id: binding.client_id },
+          select: { name: true },
+        });
         const entry = getOrCreateEntry(transitionsByUser, change.userExternalId);
         entry.departures.push({
           clientId: binding.client_id,
-          clientName: (binding as any).clients?.name,
+          clientName: client?.name,
           reason: 'group_removed',
           groupId,
         });
@@ -121,21 +126,25 @@ export async function detectMoverTransitions(
 
     // Check added groups against client_group_bindings
     for (const groupId of change.added) {
-      const binding = await prisma.client_group_bindings?.findFirst({
+      const binding = await prisma.client_group_bindings.findFirst({
         where: {
           directory_group_id: groupId,
           agency_id: agencyId,
           is_active: true,
         },
-        select: { client_id: true, clients: { select: { name: true } } },
-      }).catch(() => null);
+        select: { client_id: true },
+      });
 
       if (binding) {
         matched = true;
+        const client = await prisma.clients.findUnique({
+          where: { id: binding.client_id },
+          select: { name: true },
+        });
         const entry = getOrCreateEntry(transitionsByUser, change.userExternalId);
         entry.arrivals.push({
           clientId: binding.client_id,
-          clientName: (binding as any).clients?.name,
+          clientName: client?.name,
           reason: 'group_added',
           groupId,
         });
@@ -226,10 +235,10 @@ export async function analyzeMoverCoverage(
   });
 
   // Get clients with group bindings from SoT source groups
-  const groupBindings = await prisma.client_group_bindings?.findMany({
+  const groupBindings = await prisma.client_group_bindings.findMany({
     where: { agency_id: agencyId, is_active: true },
     select: { client_id: true, directory_group_id: true },
-  }).catch(() => []) || [];
+  });
 
   // Check which bound groups belong to SoT source
   const sotGroups = await prisma.directory_groups.findMany({
