@@ -1,3 +1,7 @@
 {
-  "google-workspace": "./identity/google-workspace/processors/index.js"
+  "google-workspace": "./identity/google-workspace/processors/index.js",
+  "local-directory": "./identity/local-directory/processors/index.js",
+  "notification-webhook": "./notifications/webhook/processors/index.js",
+  "notification-email": "./notifications/email/processors/index.js",
+  "notification-slack": "./notifications/slack/processors/index.js"
 }
