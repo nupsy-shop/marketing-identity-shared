@@ -89,11 +89,41 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
   // 4. Sync users (paginated)
   let userPageToken: string | undefined;
   const seenUserEmails = new Set<string>();
+  const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
 
   do {
     const page = await fetchUsers(accessToken, domain, userPageToken);
     for (const user of page.users ?? []) {
+      // Capture previous department/title for attribute-based mover detection
+      const existingUser = await prisma.gws_directory_users.findFirst({
+        where: { source_id: sourceId, email: user.primaryEmail },
+        select: { department: true, job_title: true },
+      });
       await upsertGwsUser(prisma, sourceId, tenantId, user);
+      // Track attribute changes for mover detection
+      if (existingUser) {
+        const orgs = (user as any).organizations as Array<{ department?: string; title?: string }> | undefined;
+        const newDept = orgs?.[0]?.department || null;
+        const newTitle = orgs?.[0]?.title || null;
+        if (existingUser.department !== newDept && (existingUser.department || newDept)) {
+          attributeChanges.push({
+            userExternalId: user.primaryEmail,
+            userEmail: user.primaryEmail,
+            attribute: 'department',
+            oldValue: existingUser.department,
+            newValue: newDept,
+          });
+        }
+        if (existingUser.job_title !== newTitle && (existingUser.job_title || newTitle)) {
+          attributeChanges.push({
+            userExternalId: user.primaryEmail,
+            userEmail: user.primaryEmail,
+            attribute: 'job_title',
+            oldValue: existingUser.job_title,
+            newValue: newTitle,
+          });
+        }
+      }
       seenUserEmails.add(user.primaryEmail);
       stats.usersUpserted++;
     }
@@ -201,13 +231,18 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
       last_sync_at: new Date(),
       last_sync_status: 'success',
       last_sync_error: null,
-      last_sync_stats: stats,
+      last_sync_stats: { ...stats, attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined },
       connection_state: 'connected',
       next_sync_at: new Date(Date.now() + (source.sync_interval_hours || 6) * 60 * 60 * 1000),
       updated_at: new Date(),
     },
   });
 
+  if (attributeChanges.length > 0) {
+    logger.info('gws_sync_directory: attribute changes detected', {
+      tenantId, sourceId, count: attributeChanges.length,
+    });
+  }
   logger.info('gws_sync_directory: sync completed', { jobId: String(job.id), tenantId, sourceId, stats });
 
   publishAuditEvent({
@@ -270,6 +305,9 @@ async function upsertGwsUser(
   user: GoogleUser,
 ): Promise<void> {
   const now = new Date();
+  const orgs = (user as any).organizations as Array<{ department?: string; title?: string }> | undefined;
+  const department = orgs?.[0]?.department || null;
+  const jobTitle = orgs?.[0]?.title || null;
   await prisma.gws_directory_users.upsert({
     where: { source_id_email: { source_id: sourceId, email: user.primaryEmail } },
     create: {
@@ -284,6 +322,8 @@ async function upsertGwsUser(
       is_active: true,
       google_id: user.id,
       org_unit_path: user.orgUnitPath || null,
+      department,
+      job_title: jobTitle,
       thumbnail_photo_url: user.thumbnailPhotoUrl || null,
       primary_email: user.primaryEmail,
       aliases: user.aliases || null,
@@ -304,6 +344,8 @@ async function upsertGwsUser(
       is_active: true,
       google_id: user.id,
       org_unit_path: user.orgUnitPath || null,
+      department,
+      job_title: jobTitle,
       thumbnail_photo_url: user.thumbnailPhotoUrl || null,
       primary_email: user.primaryEmail,
       aliases: user.aliases || null,
