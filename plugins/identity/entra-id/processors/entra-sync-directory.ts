@@ -196,15 +196,19 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       stats.groupsUpserted++;
     }
 
-    // Mark groups not returned by Graph as inactive
-    await prisma.entra_groups.updateMany({
-      where: {
-        source_id: sourceId,
-        entra_group_id: { notIn: Array.from(seenGroupIds) },
-        is_active: true,
-      },
-      data: { is_active: false, updated_at: new Date(), last_synced_at: new Date() },
-    });
+    // Mark groups not returned by Graph as inactive.
+    // Guard: if Graph returned zero groups (API outage / transient failure),
+    // seenGroupIds is empty and notIn: [] would deactivate every group.
+    if (seenGroupIds.size > 0) {
+      await prisma.entra_groups.updateMany({
+        where: {
+          source_id: sourceId,
+          entra_group_id: { notIn: Array.from(seenGroupIds) },
+          is_active: true,
+        },
+        data: { is_active: false, updated_at: new Date(), last_synced_at: new Date() },
+      });
+    }
 
     // 6. Fetch and sync group memberships
     const activeGroups = await prisma.entra_groups.findMany({
@@ -217,7 +221,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
 
     for (const dbGroup of activeGroups) {
       const members = await fetchGroupMembers(accessToken, dbGroup.entra_group_id);
-      const membershipChanges = await syncEntraMemberships(dbGroup.id, tenantId, members);
+      const membershipChanges = await syncEntraMemberships(sourceId, dbGroup.id, tenantId, members);
       for (const entraUserId of membershipChanges.addedEntraUserIds) {
         if (!groupChangesByUser.has(entraUserId)) groupChangesByUser.set(entraUserId, { added: [], removed: [] });
         groupChangesByUser.get(entraUserId)!.added.push(dbGroup.id);
@@ -394,6 +398,7 @@ async function upsertEntraDirectoryUser(
       entra_user_id: user.id,
       user_principal_name: user.userPrincipalName ?? null,
       raw_attributes: user as any,
+      updated_at: new Date(),
       last_synced_at: new Date(),
     },
     create: {
@@ -427,6 +432,7 @@ async function upsertEntraGroup(
       description: group.description ?? null,
       email: group.mail ?? null,
       raw_attributes: group as any,
+      updated_at: new Date(),
       last_synced_at: new Date(),
       is_active: true,
     },
@@ -446,6 +452,7 @@ async function upsertEntraGroup(
 }
 
 async function syncEntraMemberships(
+  sourceId: string,
   groupDbId: string,
   agencyId: string,
   members: EntraMember[],
@@ -454,8 +461,10 @@ async function syncEntraMemberships(
 
   // Resolve each member's email via entra_directory_users (looked up by entra_user_id / Graph GUID).
   // Only members present in our synced users can be tracked.
+  // Scoped by source_id + agency_id for defense-in-depth (agency_id is redundant via
+  // identity_sources.agency_id FK, but explicit scoping prevents cross-tenant leakage).
   const memberUsers = await prisma.entra_directory_users.findMany({
-    where: { entra_user_id: { in: members.map(m => m.id) } },
+    where: { source_id: sourceId, agency_id: agencyId, entra_user_id: { in: members.map(m => m.id) } },
     select: { entra_user_id: true, email: true },
   });
   const emailByGraphId = new Map(memberUsers.map(u => [u.entra_user_id, u.email]));
@@ -504,7 +513,7 @@ async function syncEntraMemberships(
   const allAffectedEmails = [...newEmails, ...staleEmails];
   const affectedUsers = allAffectedEmails.length > 0
     ? await prisma.entra_directory_users.findMany({
-        where: { email: { in: allAffectedEmails } },
+        where: { source_id: sourceId, agency_id: agencyId, email: { in: allAffectedEmails } },
         select: { email: true, entra_user_id: true },
       })
     : [];
