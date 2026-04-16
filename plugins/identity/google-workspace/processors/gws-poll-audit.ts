@@ -15,9 +15,10 @@ import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent, flushAll } from '../../../../lib/audit/publisher.js';
 
 interface JobResult {
-  status: 'completed';
+  status: 'completed' | 'skipped';
   jobType: string;
   eventsPublished?: number;
+  reason?: string;
 }
 
 interface GoogleTokenResponse {
@@ -81,15 +82,25 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
 
   if (!source) {
     logger.info('gws_poll_audit: no GWS source found, skipped', { jobId: String(job.id) });
-    return { status: 'completed', jobType: 'gws_poll_audit', eventsPublished: 0 };
+    return {
+      status: 'skipped',
+      jobType: 'gws_poll_audit',
+      eventsPublished: 0,
+      reason: 'no Google Workspace source',
+    };
   }
 
   const config = (source.connection_config || {}) as Record<string, unknown>;
 
-  // 2. Check toggle
+  // 2. Check toggle (defensive — the dispatcher already filters by this)
   if (!config.auditIngestionEnabled) {
     logger.info('gws_poll_audit: audit ingestion disabled, skipped', { jobId: String(job.id) });
-    return { status: 'completed', jobType: 'gws_poll_audit', eventsPublished: 0 };
+    return {
+      status: 'skipped',
+      jobType: 'gws_poll_audit',
+      eventsPublished: 0,
+      reason: 'audit ingestion disabled',
+    };
   }
 
   // 3. Get OAuth token
@@ -100,8 +111,9 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
   });
 
   if (!oauthToken) {
-    logger.warn('gws_poll_audit: no active OAuth token', { jobId: String(job.id) });
-    return { status: 'completed', jobType: 'gws_poll_audit', eventsPublished: 0 };
+    // Audit is enabled but no active OAuth token — user must reconnect.
+    // Throw so the job is marked failed and the error surfaces in the dashboard.
+    throw new Error('Google Workspace OAuth token missing — reconnect the identity source');
   }
 
   let accessToken = oauthToken.accessToken;
@@ -111,8 +123,9 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
     const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
     const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
     if (!oauthToken.refreshToken || !clientId || !clientSecret) {
-      logger.warn('gws_poll_audit: token expired, cannot refresh', { jobId: String(job.id) });
-      return { status: 'completed', jobType: 'gws_poll_audit', eventsPublished: 0 };
+      throw new Error(
+        'Google Workspace token expired and cannot be refreshed — reconnect the identity source',
+      );
     }
 
     const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -127,8 +140,7 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
     });
 
     if (!res.ok) {
-      logger.error('gws_poll_audit: token refresh failed', { jobId: String(job.id) });
-      return { status: 'completed', jobType: 'gws_poll_audit', eventsPublished: 0 };
+      throw new Error(`Google Workspace token refresh failed: HTTP ${res.status}`);
     }
 
     const tokenData: GoogleTokenResponse = await res.json();
@@ -173,8 +185,7 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
       });
 
       if (!res.ok) {
-        logger.warn(`gws_poll_audit: Reports API ${app} returned ${res.status}`, { jobId: String(job.id) });
-        break;
+        throw new Error(`Google Workspace Reports API (${app}) returned HTTP ${res.status}`);
       }
 
       const data: ReportsResponse = await res.json();

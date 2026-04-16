@@ -19,9 +19,10 @@ import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent, flushAll } from '../../../../lib/audit/publisher.js';
 
 interface JobResult {
-  status: 'completed';
+  status: 'completed' | 'skipped';
   jobType: string;
   eventsPublished?: number;
+  reason?: string;
 }
 
 interface TokenResponse {
@@ -99,15 +100,25 @@ export default async function entraPollAudit(job: Bull.Job): Promise<JobResult> 
 
   if (!source) {
     logger.info('entra_poll_audit: no Entra ID source found, skipped', { jobId: String(job.id) });
-    return { status: 'completed', jobType: 'entra_poll_audit', eventsPublished: 0 };
+    return {
+      status: 'skipped',
+      jobType: 'entra_poll_audit',
+      eventsPublished: 0,
+      reason: 'no Entra ID source',
+    };
   }
 
   const config = (source.connection_config || {}) as Record<string, unknown>;
 
-  // 2. Check toggle
+  // 2. Check toggle (defensive — the dispatcher already filters by this)
   if (!config.auditIngestionEnabled) {
     logger.info('entra_poll_audit: audit ingestion disabled, skipped', { jobId: String(job.id) });
-    return { status: 'completed', jobType: 'entra_poll_audit', eventsPublished: 0 };
+    return {
+      status: 'skipped',
+      jobType: 'entra_poll_audit',
+      eventsPublished: 0,
+      reason: 'audit ingestion disabled',
+    };
   }
 
   // 3. Get access token via client credentials
@@ -116,8 +127,11 @@ export default async function entraPollAudit(job: Bull.Job): Promise<JobResult> 
   const clientSecret = (config.clientSecret as string) || process.env.ENTRA_ID_CLIENT_SECRET || process.env.MICROSOFT_CLIENT_SECRET;
 
   if (!msftTenantId || !clientId || !clientSecret) {
-    logger.warn('entra_poll_audit: missing credentials', { jobId: String(job.id) });
-    return { status: 'completed', jobType: 'entra_poll_audit', eventsPublished: 0 };
+    // Misconfiguration — source says audit is on but creds are absent.
+    // Throw so the job is marked failed and the error surfaces in the dashboard.
+    throw new Error(
+      'Entra ID credentials missing — configure tenantId, clientId, clientSecret on the identity source',
+    );
   }
 
   const tokenRes = await fetch(`https://login.microsoftonline.com/${msftTenantId}/oauth2/v2.0/token`, {
@@ -132,8 +146,9 @@ export default async function entraPollAudit(job: Bull.Job): Promise<JobResult> 
   });
 
   if (!tokenRes.ok) {
-    logger.error('entra_poll_audit: failed to obtain token', { jobId: String(job.id), status: tokenRes.status });
-    return { status: 'completed', jobType: 'entra_poll_audit', eventsPublished: 0 };
+    // Invalid credentials or Entra outage — fail so retries can recover
+    // (transient) and ultimately surface the error if credentials are wrong.
+    throw new Error(`Entra ID token request failed: HTTP ${tokenRes.status}`);
   }
 
   const { access_token: accessToken }: TokenResponse = await tokenRes.json();
@@ -161,8 +176,7 @@ export default async function entraPollAudit(job: Bull.Job): Promise<JobResult> 
     });
 
     if (!res.ok) {
-      logger.warn(`entra_poll_audit: directoryAudits returned ${res.status}`, { jobId: String(job.id) });
-      break;
+      throw new Error(`Entra ID directoryAudits API returned HTTP ${res.status}`);
     }
 
     const data: GraphListResponse<DirectoryAuditEntry> = await res.json();
@@ -218,12 +232,13 @@ export default async function entraPollAudit(job: Bull.Job): Promise<JobResult> 
 
     if (!res.ok) {
       // Sign-in logs require Azure AD Premium — 403 is expected for free tier
+      // and should not fail the job (directoryAudits may have already published
+      // events successfully). Other non-2xx responses indicate a real problem.
       if (res.status === 403) {
         logger.info('entra_poll_audit: sign-in logs not available (requires Azure AD Premium)', { jobId: String(job.id) });
-      } else {
-        logger.warn(`entra_poll_audit: signIns returned ${res.status}`, { jobId: String(job.id) });
+        break;
       }
-      break;
+      throw new Error(`Entra ID signIns API returned HTTP ${res.status}`);
     }
 
     const data: GraphListResponse<SignInEntry> = await res.json();
