@@ -2,8 +2,8 @@
  * Entra ID Sync Directory — Plugin Processor
  *
  * Processes entra_sync_directory Bull jobs. Syncs users, groups, and
- * memberships from Microsoft Entra ID (Azure AD) into the shared
- * directory tables (directory_users, directory_groups, directory_memberships).
+ * memberships from Microsoft Entra ID (Azure AD) into the entra_* tables
+ * (entra_directory_users, entra_groups, entra_group_members).
  *
  * Mirrors the structure of gws-sync-directory.ts. Uses client credentials
  * (tenant-registered app) for token acquisition, consistent with other
@@ -97,7 +97,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     }).catch(() => {});
 
     // 3. Fetch and upsert users
-    const seenExternalIds = new Set<string>();
+    const seenEmails = new Set<string>();
     const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
     const newJoiners: string[] = [];
     const newSuspended: string[] = [];
@@ -105,10 +105,13 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     const users = await fetchUsers(accessToken);
 
     for (const user of users) {
-      // Capture previous department/title for attribute-based mover detection
-      const existingUser = await prisma.directory_users.findFirst({
-        where: { source_id: sourceId, external_id: user.id },
-        select: { department: true, job_title: true, is_suspended: true },
+      const email = (user.mail || user.userPrincipalName)?.toLowerCase();
+      if (!email) continue;
+
+      // Capture previous state for change detection (attribute-based mover + suspension)
+      const existingUser = await prisma.entra_directory_users.findFirst({
+        where: { source_id: sourceId, entra_user_id: user.id },
+        select: { department: true, job_title: true, is_active: true },
       });
 
       if (!existingUser) {
@@ -117,17 +120,20 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
           newJoiners.push(user.id);
         }
       } else {
-        // Check suspension status change
-        const wasSuspended = (existingUser as any).is_suspended || false;
-        const nowSuspended = user.accountEnabled === false;
-        if (!wasSuspended && nowSuspended) {
+        // Suspension detection: entra_directory_users only has is_active.
+        // Previous is_active=true + now accountEnabled=false → suspended.
+        // Previous is_active=false + now accountEnabled=true → unsuspended.
+        const wasActive = existingUser.is_active !== false;
+        const nowActive = user.accountEnabled !== false;
+        if (wasActive && !nowActive) {
           newSuspended.push(user.id);
-        } else if (wasSuspended && !nowSuspended) {
+        } else if (!wasActive && nowActive) {
           newUnsuspended.push(user.id);
         }
       }
 
-      await upsertDirectoryUser(prisma, sourceId, tenantId, user);
+      await upsertEntraDirectoryUser(sourceId, tenantId, user);
+
       // Track attribute changes for mover detection
       if (existingUser) {
         const newDept = user.department || null;
@@ -135,7 +141,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         if (existingUser.department !== newDept && (existingUser.department || newDept)) {
           attributeChanges.push({
             userExternalId: user.id,
-            userEmail: user.mail || user.userPrincipalName,
+            userEmail: email,
             attribute: 'department',
             oldValue: existingUser.department,
             newValue: newDept,
@@ -144,67 +150,89 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         if (existingUser.job_title !== newTitle && (existingUser.job_title || newTitle)) {
           attributeChanges.push({
             userExternalId: user.id,
-            userEmail: user.mail || user.userPrincipalName,
+            userEmail: email,
             attribute: 'job_title',
             oldValue: existingUser.job_title,
             newValue: newTitle,
           });
         }
       }
-      seenExternalIds.add(user.id);
+
+      seenEmails.add(email);
       stats.usersUpserted++;
     }
 
     // 4. Mark users not returned by Graph as inactive
-    const allActiveUsers = await prisma.directory_users.findMany({
+    // Fetch active set BEFORE deactivating so we can capture leavers' entra_user_ids.
+    const allActiveUsers = await prisma.entra_directory_users.findMany({
       where: { source_id: sourceId, is_active: true },
-      select: { id: true, external_id: true },
+      select: { email: true, entra_user_id: true },
     });
 
-    const toDeactivate = allActiveUsers
-      .filter((u: { id: string; external_id: string }) => !seenExternalIds.has(u.external_id))
-      .map((u: { id: string }) => u.id);
+    const toDeactivateIds: string[] = []; // entra_user_ids of leavers (for lifecycle payload)
+    const toDeactivateEmails: string[] = [];
+    for (const u of allActiveUsers) {
+      if (!seenEmails.has(u.email)) {
+        if (u.entra_user_id) toDeactivateIds.push(u.entra_user_id);
+        toDeactivateEmails.push(u.email);
+      }
+    }
 
-    if (toDeactivate.length > 0) {
-      await prisma.directory_users.updateMany({
-        where: { id: { in: toDeactivate } },
-        data: { is_active: false, updated_at: new Date() },
+    if (toDeactivateEmails.length > 0) {
+      await prisma.entra_directory_users.updateMany({
+        where: { source_id: sourceId, email: { in: toDeactivateEmails }, is_active: true },
+        data: { is_active: false, updated_at: new Date(), last_synced_at: new Date() },
       });
-      stats.usersDeactivated = toDeactivate.length;
+      stats.usersDeactivated = toDeactivateEmails.length;
     }
 
     // 5. Fetch and upsert groups
+    const seenGroupIds = new Set<string>(); // entra_group_id values seen this sync
     const groups = await fetchGroups(accessToken);
 
     for (const group of groups) {
-      await upsertDirectoryGroup(prisma, sourceId, tenantId, group);
+      await upsertEntraGroup(sourceId, tenantId, group);
+      seenGroupIds.add(group.id);
       stats.groupsUpserted++;
     }
 
-    // 6. Fetch and sync group memberships
-    const activeGroups = await prisma.directory_groups.findMany({
-      where: { source_id: sourceId },
-      select: { id: true, external_id: true },
+    // Mark groups not returned by Graph as inactive
+    await prisma.entra_groups.updateMany({
+      where: {
+        source_id: sourceId,
+        entra_group_id: { notIn: Array.from(seenGroupIds) },
+        is_active: true,
+      },
+      data: { is_active: false, updated_at: new Date(), last_synced_at: new Date() },
     });
 
+    // 6. Fetch and sync group memberships
+    const activeGroups = await prisma.entra_groups.findMany({
+      where: { source_id: sourceId, is_active: true },
+      select: { id: true, entra_group_id: true },
+    });
+
+    // groupChanges map: entra_user_id → { added: groupDbId[], removed: groupDbId[] }
     const groupChangesByUser = new Map<string, { added: string[]; removed: string[] }>();
 
     for (const dbGroup of activeGroups) {
-      const members = await fetchGroupMembers(accessToken, dbGroup.external_id);
-      const membershipChanges = await syncMemberships(prisma, sourceId, dbGroup.id, tenantId, members);
-      for (const externalId of membershipChanges.added) {
-        if (!groupChangesByUser.has(externalId)) groupChangesByUser.set(externalId, { added: [], removed: [] });
-        groupChangesByUser.get(externalId)!.added.push(dbGroup.id);
+      const members = await fetchGroupMembers(accessToken, dbGroup.entra_group_id);
+      const membershipChanges = await syncEntraMemberships(dbGroup.id, tenantId, members);
+      for (const entraUserId of membershipChanges.addedEntraUserIds) {
+        if (!groupChangesByUser.has(entraUserId)) groupChangesByUser.set(entraUserId, { added: [], removed: [] });
+        groupChangesByUser.get(entraUserId)!.added.push(dbGroup.id);
       }
-      for (const externalId of membershipChanges.removed) {
-        if (!groupChangesByUser.has(externalId)) groupChangesByUser.set(externalId, { added: [], removed: [] });
-        groupChangesByUser.get(externalId)!.removed.push(dbGroup.id);
+      for (const entraUserId of membershipChanges.removedEntraUserIds) {
+        if (!groupChangesByUser.has(entraUserId)) groupChangesByUser.set(entraUserId, { added: [], removed: [] });
+        groupChangesByUser.get(entraUserId)!.removed.push(dbGroup.id);
       }
       stats.membershipsProcessed += members.length;
     }
 
-    // 7. Auto-link directory users to app users by email
-    await autoLinkByEmail(prisma, sourceId);
+    // 7. autoLinkByEmail is disabled — identity_links FK targets directory_users
+    // which this sync no longer writes to. Re-enable after Phase 6 migrates
+    // identity_links to a polymorphic reference.
+    // await autoLinkByEmail(prisma, sourceId);
 
     // 8. Update source sync status
     await prisma.identity_sources.update({
@@ -250,19 +278,23 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
 
     // 10. Enqueue JML lifecycle processing if there are events to process
     const { enqueueJob } = getRuntime();
-    const leaverExternalIds = toDeactivate.length > 0
-      ? allActiveUsers.filter((u: any) => toDeactivate.includes(u.id)).map((u: any) => u.external_id)
-      : [];
-    const groupChanges = Array.from(groupChangesByUser.entries()).map(([externalId, changes]) => ({
-      userExternalId: externalId,
-      userEmail: users.find(u => u.id === externalId)?.mail || users.find(u => u.id === externalId)?.userPrincipalName || '',
-      added: changes.added,
-      removed: changes.removed,
-    }));
+
+    // Build groupChanges payload: entra_user_id is used as userExternalId for
+    // downstream JML processors — consistent with the previous external_id field
+    // which also held the Graph user GUID.
+    const groupChanges = Array.from(groupChangesByUser.entries()).map(([entraUserId, changes]) => {
+      const matchedUser = users.find(u => u.id === entraUserId);
+      return {
+        userExternalId: entraUserId,
+        userEmail: (matchedUser?.mail || matchedUser?.userPrincipalName || '').toLowerCase(),
+        added: changes.added,
+        removed: changes.removed,
+      };
+    });
 
     const hasLifecycleEvents =
       newJoiners.length > 0 ||
-      leaverExternalIds.length > 0 ||
+      toDeactivateIds.length > 0 ||
       newSuspended.length > 0 ||
       newUnsuspended.length > 0 ||
       groupChanges.length > 0 ||
@@ -276,7 +308,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         triggeredBy: `entra_sync_directory:${job.id}`,
         lifecycleEvents: {
           joiners: newJoiners.length > 0 ? newJoiners : undefined,
-          leavers: leaverExternalIds.length > 0 ? leaverExternalIds : undefined,
+          leavers: toDeactivateIds.length > 0 ? toDeactivateIds : undefined,
           suspended: newSuspended.length > 0 ? newSuspended : undefined,
           unsuspended: newUnsuspended.length > 0 ? newUnsuspended : undefined,
           groupChanges: groupChanges.length > 0 ? groupChanges : undefined,
@@ -291,7 +323,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       logger.info('entra_sync_directory: enqueued jml_process_lifecycle', {
         tenantId, sourceId,
         joiners: newJoiners.length,
-        leavers: leaverExternalIds.length,
+        leavers: toDeactivateIds.length,
         suspended: newSuspended.length,
         unsuspended: newUnsuspended.length,
         groupChanges: groupChanges.length,
@@ -341,174 +373,162 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
 
 // ─── DB Helpers ─────────────────────────────────────────────────────────────
 
-async function upsertDirectoryUser(
-  prisma: any,
+async function upsertEntraDirectoryUser(
   sourceId: string,
   agencyId: string,
   user: EntraUser,
 ): Promise<void> {
-  const now = new Date();
-  const email = (user.mail || user.userPrincipalName).toLowerCase();
+  const { prisma } = getRuntime();
+  const email = (user.mail || user.userPrincipalName)?.toLowerCase();
+  if (!email) return;
 
-  await prisma.directory_users.upsert({
-    where: { source_id_external_id: { source_id: sourceId, external_id: user.id } },
-    create: {
-      id: crypto.randomUUID(),
-      source_id: sourceId,
-      agency_id: agencyId,
-      external_id: user.id,
-      email,
-      display_name: user.displayName || email,
-      given_name: user.givenName || null,
-      family_name: user.surname || null,
-      job_title: user.jobTitle || null,
-      department: user.department || null,
-      is_active: user.accountEnabled !== false,
-      is_suspended: user.accountEnabled === false,
-      raw_attributes: user as any,
-      last_synced_at: now,
-      created_at: now,
-      updated_at: now,
-    },
+  await prisma.entra_directory_users.upsert({
+    where: { source_id_email: { source_id: sourceId, email } },
     update: {
+      display_name: user.displayName || email,
+      given_name: user.givenName ?? null,
+      family_name: user.surname ?? null,
+      job_title: user.jobTitle ?? null,
+      department: user.department ?? null,
+      is_active: user.accountEnabled !== false,
+      entra_user_id: user.id,
+      user_principal_name: user.userPrincipalName ?? null,
+      raw_attributes: user as any,
+      last_synced_at: new Date(),
+    },
+    create: {
+      source_id: sourceId,
       email,
       display_name: user.displayName || email,
-      given_name: user.givenName || null,
-      family_name: user.surname || null,
-      job_title: user.jobTitle || null,
-      department: user.department || null,
+      given_name: user.givenName ?? null,
+      family_name: user.surname ?? null,
+      job_title: user.jobTitle ?? null,
+      department: user.department ?? null,
       is_active: user.accountEnabled !== false,
-      is_suspended: user.accountEnabled === false,
+      entra_user_id: user.id,
+      user_principal_name: user.userPrincipalName ?? null,
       raw_attributes: user as any,
-      last_synced_at: now,
-      updated_at: now,
+      last_synced_at: new Date(),
+      agency_id: agencyId,
     },
   });
 }
 
-async function upsertDirectoryGroup(
-  prisma: any,
+async function upsertEntraGroup(
   sourceId: string,
   agencyId: string,
   group: EntraGroup,
 ): Promise<string> {
-  const now = new Date();
-
-  // Determine group_type: 'Microsoft365', 'Security', or null
-  let groupType: string | null = null;
-  if (group.groupTypes?.includes('Unified')) {
-    groupType = 'Microsoft365';
-  } else if (group.securityEnabled) {
-    groupType = 'Security';
-  }
-
-  const row = await prisma.directory_groups.upsert({
-    where: { source_id_external_id: { source_id: sourceId, external_id: group.id } },
-    create: {
-      id: crypto.randomUUID(),
-      source_id: sourceId,
-      agency_id: agencyId,
-      external_id: group.id,
-      display_name: group.displayName || group.id,
-      description: group.description || null,
-      email: group.mail || null,
-      group_type: groupType,
-      raw_attributes: group as any,
-      last_synced_at: now,
-      created_at: now,
-      updated_at: now,
-    },
+  const { prisma } = getRuntime();
+  const row = await prisma.entra_groups.upsert({
+    where: { source_id_entra_group_id: { source_id: sourceId, entra_group_id: group.id } },
     update: {
       display_name: group.displayName || group.id,
-      description: group.description || null,
-      email: group.mail || null,
-      group_type: groupType,
+      description: group.description ?? null,
+      email: group.mail ?? null,
       raw_attributes: group as any,
-      last_synced_at: now,
-      updated_at: now,
+      last_synced_at: new Date(),
+      is_active: true,
+    },
+    create: {
+      source_id: sourceId,
+      entra_group_id: group.id,
+      display_name: group.displayName || group.id,
+      description: group.description ?? null,
+      email: group.mail ?? null,
+      raw_attributes: group as any,
+      last_synced_at: new Date(),
+      is_active: true,
+      agency_id: agencyId,
     },
   });
-
   return row.id;
 }
 
-async function syncMemberships(
-  prisma: any,
-  sourceId: string,
+async function syncEntraMemberships(
   groupDbId: string,
   agencyId: string,
   members: EntraMember[],
-): Promise<{ added: string[]; removed: string[] }> {
-  // Build a set of directory_user DB IDs for members that exist in our table
-  const seenUserDbIds = new Set<string>();
-  const addedExternalIds: string[] = [];
+): Promise<{ addedEntraUserIds: string[]; removedEntraUserIds: string[] }> {
+  const { prisma } = getRuntime();
 
-  for (const member of members) {
-    const dbUser = await prisma.directory_users.findUnique({
-      where: { source_id_external_id: { source_id: sourceId, external_id: member.id } },
-      select: { id: true },
-    });
+  // Resolve each member's email via entra_directory_users (looked up by entra_user_id / Graph GUID).
+  // Only members present in our synced users can be tracked.
+  const memberUsers = await prisma.entra_directory_users.findMany({
+    where: { entra_user_id: { in: members.map(m => m.id) } },
+    select: { entra_user_id: true, email: true },
+  });
+  const emailByGraphId = new Map(memberUsers.map(u => [u.entra_user_id, u.email]));
+  const memberEmails = members
+    .map(m => emailByGraphId.get(m.id))
+    .filter((e): e is string => Boolean(e));
 
-    if (!dbUser) continue; // User not synced yet — skip
-    seenUserDbIds.add(dbUser.id);
+  // Fetch existing memberships to detect adds
+  const existing = await prisma.entra_group_members.findMany({
+    where: { group_id: groupDbId },
+    select: { user_email: true },
+  });
+  const existingEmails = new Set(existing.map(e => e.user_email));
+  const newEmails = memberEmails.filter(e => !existingEmails.has(e));
 
-    const existingMembership = await prisma.directory_memberships.findUnique({
-      where: { user_id_group_id: { user_id: dbUser.id, group_id: groupDbId } },
-      select: { id: true },
-    });
-
-    await prisma.directory_memberships.upsert({
-      where: { user_id_group_id: { user_id: dbUser.id, group_id: groupDbId } },
+  // Upsert all current members
+  for (const email of memberEmails) {
+    await prisma.entra_group_members.upsert({
+      where: { group_id_user_email: { group_id: groupDbId, user_email: email } },
+      update: { last_synced_at: new Date() },
       create: {
-        id: crypto.randomUUID(),
-        user_id: dbUser.id,
         group_id: groupDbId,
+        user_email: email,
+        membership_role: 'MEMBER',
+        last_synced_at: new Date(),
         agency_id: agencyId,
-        membership_type: 'MEMBER',
-        last_synced_at: new Date(),
-      },
-      update: {
-        last_synced_at: new Date(),
       },
     });
-
-    if (!existingMembership) {
-      addedExternalIds.push(member.id);
-    }
   }
 
-  // Remove memberships for users no longer in the group
-  const existingMemberships = await prisma.directory_memberships.findMany({
-    where: { group_id: groupDbId },
-    select: { id: true, user_id: true },
+  // Remove stale members
+  const staleEmails = Array.from(existingEmails).filter(e => !memberEmails.includes(e));
+  if (staleEmails.length > 0) {
+    await prisma.entra_group_members.deleteMany({
+      where: { group_id: groupDbId, user_email: { in: staleEmails } },
+    });
+  }
+
+  // Update member_count
+  await prisma.entra_groups.update({
+    where: { id: groupDbId },
+    data: { member_count: memberEmails.length },
   });
 
-  const removedUserDbIds = existingMemberships
-    .filter((m: { id: string; user_id: string }) => !seenUserDbIds.has(m.user_id))
-    .map((m: { id: string; user_id: string }) => m.user_id);
+  // Resolve added/removed emails back to entra_user_ids for lifecycle payload
+  const allAffectedEmails = [...newEmails, ...staleEmails];
+  const affectedUsers = allAffectedEmails.length > 0
+    ? await prisma.entra_directory_users.findMany({
+        where: { email: { in: allAffectedEmails } },
+        select: { email: true, entra_user_id: true },
+      })
+    : [];
+  const graphIdByEmail = new Map(affectedUsers.map(u => [u.email, u.entra_user_id]));
+  const addedEntraUserIds = newEmails
+    .map(e => graphIdByEmail.get(e))
+    .filter((id): id is string => Boolean(id));
+  const removedEntraUserIds = staleEmails
+    .map(e => graphIdByEmail.get(e))
+    .filter((id): id is string => Boolean(id));
 
-  // Look up external IDs of removed users
-  const removedExternalIds: string[] = [];
-  if (removedUserDbIds.length > 0) {
-    const removedUsers = await prisma.directory_users.findMany({
-      where: { id: { in: removedUserDbIds } },
-      select: { external_id: true },
-    });
-    removedExternalIds.push(...removedUsers.map((u: any) => u.external_id));
-  }
-
-  const removedIds = existingMemberships
-    .filter((m: { id: string; user_id: string }) => !seenUserDbIds.has(m.user_id))
-    .map((m: { id: string }) => m.id);
-
-  if (removedIds.length > 0) {
-    await prisma.directory_memberships.deleteMany({ where: { id: { in: removedIds } } });
-  }
-
-  return { added: addedExternalIds, removed: removedExternalIds };
+  return { addedEntraUserIds, removedEntraUserIds };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function autoLinkByEmail(prisma: any, sourceId: string): Promise<void> {
+  // TODO(Phase 6): autoLinkByEmail disabled — identity_links FK targets directory_users
+  // which this sync no longer writes to. Re-enable after Phase 6 migrates
+  // identity_links to a polymorphic reference.
+  //
+  // Original implementation read directory_users and wrote identity_links.directory_user_id
+  // (hard FK to directory_users.id). Since this processor now writes to entra_directory_users,
+  // calling this function would read the wrong table and the FK reference is incompatible.
+  // Do NOT delete — Phase 6 cleanup will rewire this.
   const dirUsers = await prisma.directory_users.findMany({
     where: { source_id: sourceId, is_active: true },
     select: { id: true, email: true },
