@@ -176,6 +176,11 @@ export default async function entraPollAudit(job: Bull.Job): Promise<JobResult> 
     });
 
     if (!res.ok) {
+      if (res.status === 403) {
+        throw new Error(
+          'Entra ID audit logs unavailable — tenant requires a Microsoft Entra ID P1 or P2 license to access directoryAudits via Microsoft Graph',
+        );
+      }
       throw new Error(`Entra ID directoryAudits API returned HTTP ${res.status}`);
     }
 
