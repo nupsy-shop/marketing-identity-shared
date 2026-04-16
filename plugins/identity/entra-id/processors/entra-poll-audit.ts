@@ -178,7 +178,7 @@ export default async function entraPollAudit(job: Bull.Job): Promise<JobResult> 
     if (!res.ok) {
       if (res.status === 403) {
         throw new Error(
-          'Entra ID audit logs unavailable — tenant requires a Microsoft Entra ID P1 or P2 license to access directoryAudits via Microsoft Graph',
+          'Microsoft Graph denied access to directoryAudits (HTTP 403). Verify the tenant has an Entra ID P1/P2 license and that AuditLog.Read.All is admin-consented for the AccessHive app.',
         );
       }
       throw new Error(`Entra ID directoryAudits API returned HTTP ${res.status}`);
