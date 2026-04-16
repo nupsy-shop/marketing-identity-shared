@@ -467,7 +467,9 @@ async function syncEntraMemberships(
     where: { source_id: sourceId, agency_id: agencyId, entra_user_id: { in: members.map(m => m.id) } },
     select: { entra_user_id: true, email: true },
   });
-  const emailByGraphId = new Map(memberUsers.map(u => [u.entra_user_id, u.email]));
+  const emailByGraphId = new Map<string, string>(
+    memberUsers.map((u: { entra_user_id: string; email: string }) => [u.entra_user_id, u.email]),
+  );
   const memberEmails = members
     .map(m => emailByGraphId.get(m.id))
     .filter((e): e is string => Boolean(e));
@@ -477,7 +479,9 @@ async function syncEntraMemberships(
     where: { group_id: groupDbId },
     select: { user_email: true },
   });
-  const existingEmails = new Set(existing.map(e => e.user_email));
+  const existingEmails = new Set<string>(
+    existing.map((e: { user_email: string }) => e.user_email),
+  );
   const newEmails = memberEmails.filter(e => !existingEmails.has(e));
 
   // Upsert all current members
@@ -517,7 +521,9 @@ async function syncEntraMemberships(
         select: { email: true, entra_user_id: true },
       })
     : [];
-  const graphIdByEmail = new Map(affectedUsers.map(u => [u.email, u.entra_user_id]));
+  const graphIdByEmail = new Map<string, string>(
+    affectedUsers.map((u: { email: string; entra_user_id: string }) => [u.email, u.entra_user_id]),
+  );
   const addedEntraUserIds = newEmails
     .map(e => graphIdByEmail.get(e))
     .filter((id): id is string => Boolean(id));
