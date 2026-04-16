@@ -97,7 +97,9 @@ export async function detectMoverTransitions(
 
     // Check removed groups against client_group_bindings
     for (const groupId of change.removed) {
-      const binding = await prisma.client_group_bindings.findFirst({
+      // TODO(reconciliation-refactor): once mover-detector receives polymorphic
+      // group IDs, drop the directory_group_id branch and keep only source_group_id.
+      let binding = await prisma.client_group_bindings.findFirst({
         where: {
           directory_group_id: groupId,
           agency_id: agencyId,
@@ -105,6 +107,17 @@ export async function detectMoverTransitions(
         },
         select: { client_id: true },
       });
+      // Fallback: check polymorphic bindings so new-style bindings are also caught.
+      if (!binding) {
+        binding = await prisma.client_group_bindings.findFirst({
+          where: {
+            source_group_id: groupId,
+            agency_id: agencyId,
+            is_active: true,
+          },
+          select: { client_id: true },
+        });
+      }
 
       if (binding) {
         matched = true;
@@ -126,7 +139,9 @@ export async function detectMoverTransitions(
 
     // Check added groups against client_group_bindings
     for (const groupId of change.added) {
-      const binding = await prisma.client_group_bindings.findFirst({
+      // TODO(reconciliation-refactor): once mover-detector receives polymorphic
+      // group IDs, drop the directory_group_id branch and keep only source_group_id.
+      let binding = await prisma.client_group_bindings.findFirst({
         where: {
           directory_group_id: groupId,
           agency_id: agencyId,
@@ -134,6 +149,17 @@ export async function detectMoverTransitions(
         },
         select: { client_id: true },
       });
+      // Fallback: check polymorphic bindings so new-style bindings are also caught.
+      if (!binding) {
+        binding = await prisma.client_group_bindings.findFirst({
+          where: {
+            source_group_id: groupId,
+            agency_id: agencyId,
+            is_active: true,
+          },
+          select: { client_id: true },
+        });
+      }
 
       if (binding) {
         matched = true;
@@ -237,19 +263,24 @@ export async function analyzeMoverCoverage(
   // Get clients with group bindings from SoT source groups
   const groupBindings = await prisma.client_group_bindings.findMany({
     where: { agency_id: agencyId, is_active: true },
-    select: { client_id: true, directory_group_id: true },
+    select: { client_id: true, directory_group_id: true, source_group_id: true, source_type: true },
   });
 
-  // Check which bound groups belong to SoT source
+  // Check which bound groups belong to SoT source (legacy path via directory_groups).
   const sotGroups = await prisma.directory_groups.findMany({
     where: { source_id: sourceId },
     select: { id: true },
   });
   const sotGroupIds = new Set(sotGroups.map((g: any) => g.id));
 
+  // TODO(reconciliation-refactor): once all bindings use polymorphic source_type +
+  // source_group_id, replace the legacy directory_group_id branch with a proper
+  // lookup against gws_groups or entra_groups filtered by source_id. For now,
+  // any binding with a non-null source_group_id is treated as covered (transitional
+  // approximation acceptable for the reconciliation migration window).
   const groupCoveredClientIds = new Set(
     groupBindings
-      .filter((b: any) => sotGroupIds.has(b.directory_group_id))
+      .filter((b: any) => sotGroupIds.has(b.directory_group_id) || b.source_group_id != null)
       .map((b: any) => b.client_id),
   );
 
