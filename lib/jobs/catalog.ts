@@ -104,6 +104,7 @@ export const JOB_CATALOG = {
   dispatch_detect_drift:      { queue: QUEUE_NAMES.SYSTEM },
   dispatch_enforce_retention: { queue: QUEUE_NAMES.SYSTEM },
   dispatch_discover_assets:   { queue: QUEUE_NAMES.SYSTEM },
+  dispatch_sync_directories:  { queue: QUEUE_NAMES.SYSTEM },
   iam_provision_realm:        { queue: QUEUE_NAMES.SYSTEM },
 } as const satisfies Record<string, JobDefinition>;
 
