@@ -23,9 +23,10 @@ import {
 } from './api/directory.js';
 
 interface JobResult {
-  status: 'completed';
+  status: 'completed' | 'skipped';
   jobType: string;
-  stats: SyncStats;
+  stats?: SyncStats;
+  reason?: string;
 }
 
 interface SyncStats {
@@ -59,9 +60,9 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       tenantId,
     });
     return {
-      status: 'completed',
+      status: 'skipped',
       jobType: 'entra_sync_directory',
-      stats: { usersUpserted: 0, usersDeactivated: 0, groupsUpserted: 0, membershipsProcessed: 0 },
+      reason: 'no connected Entra ID source',
     };
   }
 

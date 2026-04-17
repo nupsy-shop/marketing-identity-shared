@@ -23,9 +23,10 @@ import {
 } from './api/directory.js';
 
 interface JobResult {
-  status: 'completed';
+  status: 'completed' | 'skipped';
   jobType: string;
-  stats: SyncStats;
+  stats?: SyncStats;
+  reason?: string;
 }
 
 interface SyncStats {
@@ -54,7 +55,11 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
 
   if (!source) {
     logger.info('gws_sync_directory: no connected/degraded GWS source', { jobId: String(job.id), tenantId });
-    return { status: 'completed', jobType: 'gws_sync_directory', stats: { usersUpserted: 0, groupsUpserted: 0, membershipsProcessed: 0 } };
+    return {
+      status: 'skipped',
+      jobType: 'gws_sync_directory',
+      reason: 'no connected Google Workspace source',
+    };
   }
 
   const sourceId = source.id;
@@ -71,7 +76,18 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
   const connConfig = (source.connection_config || {}) as Record<string, unknown>;
   const domain = (connConfig.primaryDomain as string) || '';
   if (!domain) {
-    throw new Error('primaryDomain not configured on GWS identity source');
+    // Config gap — the OAuth flow didn't capture the primary domain, or
+    // it was cleared. Not a transient failure; retries won't help, and a
+    // circuit breaker can't recover it. Skip until an operator fixes the
+    // source config.
+    logger.warn('gws_sync_directory: primaryDomain not configured', {
+      jobId: String(job.id), tenantId, sourceId,
+    });
+    return {
+      status: 'skipped',
+      jobType: 'gws_sync_directory',
+      reason: 'primaryDomain not configured on GWS identity source',
+    };
   }
 
   logger.info('gws_sync_directory: starting sync', { jobId: String(job.id), tenantId, sourceId, domain });
