@@ -11,6 +11,13 @@
  */
 
 import { getRuntime } from '../runtime.js';
+import {
+  resolveJoinerAction,
+  resolveLeaverAction,
+  resolveSuspensionAction,
+  resolveNotifications,
+  type ResolvedAction,
+} from './policy-action-map.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -183,6 +190,7 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
   processed: number;
   skippedByScope: number;
   skippedByGuardrail: boolean;
+  enqueued: number;
 }> {
   const { sourceId, agencyId, pluginKey, events, policies, guardrails, scope } = params;
   const { logger } = getRuntime();
@@ -217,25 +225,98 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
       threshold: guardrails.max_revocations_per_sync,
       agencyId,
     });
-    return { processed: 0, skippedByScope, skippedByGuardrail: true };
+    return { processed: 0, skippedByScope, skippedByGuardrail: true, enqueued: 0 };
   }
 
-  // 3. Process each event type
-  // NOTE: The actual processing logic (revocation calls, scheduled action creation,
-  // notification dispatch, audit logging) depends on imports that differ between
-  // web app and worker. This shared module provides the scope filtering and guardrail
-  // logic. The caller should pass the filtered events to the existing processLifecycleEvents()
-  // in sync-engine.ts (web app) or implement the same logic in the worker processor.
-  //
-  // For Phase 3, the primary value of this shared module is scope filtering.
-  // The full processing logic migration (revocation, scheduling, notifications)
-  // will be a future iteration.
+  // 3. Fan out to per-action jobs via the policy-action map.
+  //    Each event → one primary action job (create/revoke/disable/enable)
+  //    plus optional notification jobs per the policy's notify_* flags.
+  //    All downstream routing (queue selection, retries, etc.) happens via
+  //    the shared catalog once the jobType is determined.
+  const { enqueueJob } = getRuntime();
+  if (!enqueueJob) {
+    // Host did not wire up an enqueue callback — caller must dispatch the
+    // events themselves. Return counts only. This preserves the behavior
+    // of hosts that compose lifecycle processing with a custom dispatcher.
+    processed = totalFiltered;
+    return {
+      processed,
+      skippedByScope,
+      skippedByGuardrail: false,
+      enqueued: 0,
+    };
+  }
+
+  let enqueued = 0;
+
+  const dispatch = async (
+    principal: string,
+    primary: ResolvedAction | null,
+    notifications: ResolvedAction[],
+    kind: 'joiner' | 'leaver' | 'suspension',
+  ): Promise<void> => {
+    const jobs: ResolvedAction[] = [];
+    if (primary) jobs.push(primary);
+    jobs.push(...notifications);
+    for (const action of jobs) {
+      const id = await enqueueJob(action.jobType, {
+        tenantId: agencyId,
+        sourceId,
+        pluginKey,
+        principal,
+        kind,
+        triggeredBy: 'jml_process_lifecycle',
+        ...(action.extra ?? {}),
+      });
+      if (id) enqueued++;
+    }
+  };
+
+  for (const email of filteredJoiners) {
+    const primary = resolveJoinerAction(policies.joiner?.action as never, pluginKey);
+    const notifs = resolveNotifications(policies.joiner, 'joiner');
+    await dispatch(email, primary, notifs, 'joiner');
+  }
+
+  for (const email of filteredLeavers) {
+    const primary = resolveLeaverAction(policies.leaver?.action as never, pluginKey);
+    const notifs = resolveNotifications(policies.leaver, 'leaver');
+    await dispatch(email, primary, notifs, 'leaver');
+  }
+
+  for (const email of filteredSuspended) {
+    const primary = resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'suspend');
+    const notifs = resolveNotifications(policies.suspension, 'suspension');
+    await dispatch(email, primary, notifs, 'suspension');
+  }
+
+  for (const email of filteredUnsuspended) {
+    const primary = resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'unsuspend');
+    const notifs = resolveNotifications(policies.suspension, 'suspension');
+    await dispatch(email, primary, notifs, 'suspension');
+  }
 
   processed = totalFiltered;
+
+  logger.info('[JML] Lifecycle events dispatched', {
+    agencyId, sourceId, pluginKey,
+    processed, skippedByScope, enqueued,
+    joiners: filteredJoiners.length,
+    leavers: filteredLeavers.length,
+    suspended: filteredSuspended.length,
+    unsuspended: filteredUnsuspended.length,
+  });
+
+  // Group-change fan-out (mover) is intentionally deferred — those events
+  // arrive from the sync-time diff (not the principal-drift detect) and are
+  // wired through a separate mover dispatcher. See
+  // shared/lib/jml/mover-detector.ts.
+  void filteredGroupChanges;
 
   return {
     processed,
     skippedByScope,
     skippedByGuardrail: false,
+    enqueued,
   };
 }
