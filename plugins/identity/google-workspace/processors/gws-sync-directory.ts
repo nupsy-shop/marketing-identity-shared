@@ -276,8 +276,21 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
 
   // 9. Chain to jml_detect_lifecycle. Principal-drift detection runs as its
   //    own job so it's independently observable, retryable, and skips cleanly
-  //    when the source has no jml_scope configured. Group-membership and
-  //    attribute-change events are NOT forwarded here (principals only).
+  //    when the source has no jml_scope configured.
+  //
+  //    Mover events (group-membership + attribute changes) are computed
+  //    during sync (before/after state is available here only) and passed
+  //    through as detect's payload. Detect forwards them to
+  //    jml_process_lifecycle for mover-policy fan-out.
+  const groupChangesPayload = Array.from(groupChangesByUser.entries()).map(
+    ([email, changes]) => ({
+      userExternalId: email,
+      userEmail: email,
+      added: changes.added,
+      removed: changes.removed,
+    }),
+  );
+
   const { enqueueJob } = getRuntime();
   if (enqueueJob) {
     await enqueueJob('jml_detect_lifecycle', {
@@ -285,16 +298,12 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
       sourceId,
       pluginKey: 'google-workspace',
       triggeredBy: `gws_sync_directory:${job.id}`,
+      groupChanges: groupChangesPayload.length > 0 ? groupChangesPayload : undefined,
+      attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined,
     }).catch((err: Error) => {
       logger.error('gws_sync_directory: failed to enqueue jml_detect_lifecycle', {
         tenantId, sourceId, error: err.message,
       });
-    });
-  }
-
-  if (groupChangesByUser.size > 0) {
-    logger.info('gws_sync_directory: group membership changes detected (pending mover dispatcher)', {
-      tenantId, sourceId, userCount: groupChangesByUser.size,
     });
   }
 

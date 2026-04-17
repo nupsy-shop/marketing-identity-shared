@@ -15,6 +15,8 @@ import {
   resolveJoinerAction,
   resolveLeaverAction,
   resolveSuspensionAction,
+  resolveMoverGroupAction,
+  resolveMoverAttributeAction,
   resolveNotifications,
   type ResolvedAction,
 } from './policy-action-map.js';
@@ -27,6 +29,7 @@ export interface LifecycleEvents {
   suspended?: string[];       // external IDs of newly suspended users
   unsuspended?: string[];     // external IDs of unsuspended users
   groupChanges?: GroupChange[];
+  attributeChanges?: AttributeChange[];
 }
 
 export interface GroupChange {
@@ -35,6 +38,19 @@ export interface GroupChange {
   userEmail?: string;
   added?: string[];           // group IDs added
   removed?: string[];         // group IDs removed
+}
+
+/**
+ * Per-user attribute diff captured by the sync processor during upsert.
+ * Mover events (dept/title changes) fan out through `policies.mover` in
+ * the downstream `jml_process_lifecycle` cascade.
+ */
+export interface AttributeChange {
+  userExternalId: string;
+  userEmail: string;
+  attribute: string;          // e.g. 'department', 'job_title'
+  oldValue: string | null;
+  newValue: string | null;
 }
 
 export interface JmlScope {
@@ -253,7 +269,7 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
     principal: string,
     primary: ResolvedAction | null,
     notifications: ResolvedAction[],
-    kind: 'joiner' | 'leaver' | 'suspension',
+    kind: 'joiner' | 'leaver' | 'suspension' | 'mover',
   ): Promise<void> => {
     const jobs: ResolvedAction[] = [];
     if (primary) jobs.push(primary);
@@ -296,7 +312,43 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
     await dispatch(email, primary, notifs, 'suspension');
   }
 
-  processed = totalFiltered;
+  // ── Mover: group-membership changes ──
+  //    One primary job per added group and per removed group, plus the
+  //    policy's notify_admins / notify_manager channels if configured.
+  for (const change of filteredGroupChanges) {
+    const principal = change.userEmail || change.userExternalId || change.userId || '';
+    const notifs = resolveNotifications(policies.mover, 'mover');
+
+    for (const groupId of change.added ?? []) {
+      const primary = resolveMoverGroupAction(
+        policies.mover?.on_group_addition?.action as never,
+        pluginKey, 'added',
+      );
+      await dispatch(principal, primary, notifs, 'mover');
+      void groupId;
+    }
+    for (const groupId of change.removed ?? []) {
+      const primary = resolveMoverGroupAction(
+        policies.mover?.on_group_removal?.action as never,
+        pluginKey, 'removed',
+      );
+      await dispatch(principal, primary, notifs, 'mover');
+      void groupId;
+    }
+  }
+
+  // ── Mover: attribute changes (dept / title) ──
+  //    Each attribute drift triggers one iam_update_identity to bring
+  //    Keycloak in line with the directory, plus mover notifications.
+  const attributeChanges = events.attributeChanges ?? [];
+  for (const change of attributeChanges) {
+    const principal = change.userEmail || change.userExternalId;
+    const primary = resolveMoverAttributeAction(policies.mover, pluginKey);
+    const notifs = resolveNotifications(policies.mover, 'mover');
+    await dispatch(principal, primary, notifs, 'mover');
+  }
+
+  processed = totalFiltered + filteredGroupChanges.length + attributeChanges.length;
 
   logger.info('[JML] Lifecycle events dispatched', {
     agencyId, sourceId, pluginKey,
@@ -305,13 +357,9 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
     leavers: filteredLeavers.length,
     suspended: filteredSuspended.length,
     unsuspended: filteredUnsuspended.length,
+    groupChanges: filteredGroupChanges.length,
+    attributeChanges: attributeChanges.length,
   });
-
-  // Group-change fan-out (mover) is intentionally deferred — those events
-  // arrive from the sync-time diff (not the principal-drift detect) and are
-  // wired through a separate mover dispatcher. See
-  // shared/lib/jml/mover-detector.ts.
-  void filteredGroupChanges;
 
   return {
     processed,

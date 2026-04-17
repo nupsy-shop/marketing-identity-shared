@@ -262,13 +262,26 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     }).catch(() => {});
 
     // 10. Chain to jml_detect_lifecycle. Principal lifecycle detection
-    //     (joiner/leaver/suspend/unsuspend) runs post-sync as its own job so
-    //     it's independently observable and retryable, and so it can be
-    //     skipped cleanly when the source has no jml_scope configured.
-    //     Attribute-change (mover) and group-membership events are NOT
-    //     carried here — they remain a sync-time concern and are logged
-    //     above via `attributeChanges` / `groupChangesByUser` for future
-    //     mover-dispatcher work.
+    //     (joiner/leaver/suspend/unsuspend) runs post-sync as its own job
+    //     so it's independently observable and retryable, and skipped
+    //     cleanly when the source has no jml_scope configured.
+    //
+    //     Mover events (group-membership + attribute changes) are computed
+    //     DURING sync because they need before/after state, and passed
+    //     through as detect's payload. Detect merges them into the event
+    //     batch it hands to jml_process_lifecycle.
+    const groupChangesPayload = Array.from(groupChangesByUser.entries()).map(
+      ([entraUserId, changes]) => {
+        const matchedUser = users.find((u) => u.id === entraUserId);
+        return {
+          userExternalId: entraUserId,
+          userEmail: (matchedUser?.mail || matchedUser?.userPrincipalName || '').toLowerCase(),
+          added: changes.added,
+          removed: changes.removed,
+        };
+      },
+    );
+
     const { enqueueJob } = getRuntime();
     if (enqueueJob) {
       await enqueueJob('jml_detect_lifecycle', {
@@ -276,16 +289,12 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         sourceId,
         pluginKey: 'entra-id',
         triggeredBy: `entra_sync_directory:${job.id}`,
+        groupChanges: groupChangesPayload.length > 0 ? groupChangesPayload : undefined,
+        attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined,
       }).catch((err: Error) => {
         logger.error('entra_sync_directory: failed to enqueue jml_detect_lifecycle', {
           tenantId, sourceId, error: err.message,
         });
-      });
-    }
-
-    if (groupChangesByUser.size > 0) {
-      logger.info('entra_sync_directory: group membership changes detected (pending mover dispatcher)', {
-        tenantId, sourceId, userCount: groupChangesByUser.size,
       });
     }
 

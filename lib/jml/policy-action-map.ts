@@ -31,7 +31,12 @@ export type PolicyAction =
   | 'revoke_immediately'
   | 'revoke_with_grace'
   | 'disable_account'
-  | 'enable_account';
+  | 'enable_account'
+  // Mover actions — triggered when a user's group memberships or profile
+  // attributes change.
+  | 'grant_access'
+  | 'revoke_access'
+  | 'use_rbac_mappings';
 
 /**
  * Result of resolving a (lifecycle kind, policy action, plugin) triple to a
@@ -130,6 +135,66 @@ export function resolveSuspensionAction(
 }
 
 /**
+ * Resolve a mover action for a group membership change.
+ *
+ *   direction='added'   → policies.mover.on_group_addition
+ *   direction='removed' → policies.mover.on_group_removal
+ *
+ * Plugin-specific because group-membership mutations on the IdP side use
+ * different jobs per provider (entra_add_group_member /
+ * entra_remove_group_member). For providers without dedicated jobs,
+ * mover events fall back to the generic IAM paths.
+ */
+export function resolveMoverGroupAction(
+  action: PolicyAction | undefined,
+  pluginKey: string,
+  direction: 'added' | 'removed',
+): ResolvedAction | null {
+  switch (action) {
+    case 'grant_access':
+    case 'use_rbac_mappings':
+      if (direction !== 'added') return null;
+      if (pluginKey === 'entra-id') return { jobType: 'entra_add_group_member' };
+      // GWS / others: use the generic IAM path (provisioning hooks then
+      // translate to the right per-plugin side-effects).
+      return { jobType: 'iam_update_identity' };
+
+    case 'revoke_access':
+      if (direction !== 'removed') return null;
+      if (pluginKey === 'entra-id') return { jobType: 'entra_remove_group_member' };
+      return { jobType: 'iam_update_identity' };
+
+    case 'notify_only':
+      return {
+        jobType: 'email_send',
+        extra: { template: `jml.mover.group_${direction}` },
+      };
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * Attribute changes (department, job_title, etc.) don't have a dedicated
+ * action today — they fan out only as notifications via the mover policy's
+ * notify_* flags. Callers pass the whole `policies.mover` object to
+ * `resolveNotifications(..., 'mover')` and enqueue a `iam_update_identity`
+ * audit trail separately if they want attribute sync to Keycloak.
+ *
+ * Returning the IAM update job here keeps the mirror ↔ Keycloak attribute
+ * state in sync without demanding a per-policy action string.
+ */
+export function resolveMoverAttributeAction(
+  _policy: { notify_admins?: boolean; notify_manager?: boolean } | undefined,
+  _pluginKey: string,
+): ResolvedAction | null {
+  // Attribute drift should always bring Keycloak into alignment with the
+  // directory mirror. Notifications are layered on via resolveNotifications().
+  return { jobType: 'iam_update_identity' };
+}
+
+/**
  * Notification fan-out. Returns the set of notification jobs to enqueue in
  * addition to the primary action. Separate from action resolution because
  * the same lifecycle event can both fire an action and send notifications.
@@ -139,6 +204,7 @@ export function resolveNotifications(
     notify_admins?: boolean;
     notifyAdmins?: boolean;
     notify_manager?: boolean;
+    notifyManager?: boolean;
   } | undefined,
   kind: 'joiner' | 'leaver' | 'suspension' | 'mover',
 ): ResolvedAction[] {
@@ -148,7 +214,8 @@ export function resolveNotifications(
   if (adminsFlag) {
     out.push({ jobType: 'email_send', extra: { template: `jml.${kind}.notify_admins` } });
   }
-  if (policy.notify_manager) {
+  const managerFlag = policy.notify_manager ?? policy.notifyManager ?? false;
+  if (managerFlag) {
     out.push({ jobType: 'email_send', extra: { template: `jml.${kind}.notify_manager` } });
   }
   return out;

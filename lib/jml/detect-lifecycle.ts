@@ -30,7 +30,11 @@ import type {
   JmlScopeShape,
   ConnectionConfigShape,
 } from '../identity/drift/types.js';
-import type { LifecycleEvents } from './lifecycle-processor.js';
+import type {
+  LifecycleEvents,
+  GroupChange,
+  AttributeChange,
+} from './lifecycle-processor.js';
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -38,6 +42,15 @@ export interface DetectLifecycleParams {
   tenantId: string;
   sourceId: string;
   pluginKey: string;
+  /**
+   * Mover events captured by the sync processor during upsert (group-
+   * membership added/removed, attribute diffs). Detect passes these through
+   * to `jml_process_lifecycle` alongside the principal-drift events it
+   * computes from mirror-vs-identities, because mover deltas require
+   * before/after state that only the sync processor observes.
+   */
+  groupChanges?: GroupChange[];
+  attributeChanges?: AttributeChange[];
 }
 
 export type DetectLifecycleResult =
@@ -51,6 +64,8 @@ export type DetectLifecycleResult =
         suspended: number;
         unsuspended: number;
         federationOrphans: number;
+        groupChanges: number;
+        attributeChanges: number;
       };
     }
   | {
@@ -84,7 +99,7 @@ type SourceRow = {
 export async function detectLifecycle(
   params: DetectLifecycleParams,
 ): Promise<DetectLifecycleResult> {
-  const { tenantId, sourceId, pluginKey } = params;
+  const { tenantId, sourceId, pluginKey, groupChanges, attributeChanges } = params;
   const { prisma, logger } = getRuntime();
 
   // 1. Load the identity source
@@ -207,6 +222,9 @@ export async function detectLifecycle(
     leavers: leavers.length > 0 ? leavers : undefined,
     suspended: suspended.length > 0 ? suspended : undefined,
     unsuspended: unsuspended.length > 0 ? unsuspended : undefined,
+    groupChanges: groupChanges && groupChanges.length > 0 ? groupChanges : undefined,
+    attributeChanges:
+      attributeChanges && attributeChanges.length > 0 ? attributeChanges : undefined,
   };
 
   logger.info('jml_detect_lifecycle: computed principal drift', {
@@ -218,6 +236,8 @@ export async function detectLifecycle(
     suspended: suspended.length,
     unsuspended: unsuspended.length,
     federationOrphans: orphans.length,
+    groupChanges: groupChanges?.length ?? 0,
+    attributeChanges: attributeChanges?.length ?? 0,
   });
 
   return {
@@ -230,6 +250,8 @@ export async function detectLifecycle(
       suspended: suspended.length,
       unsuspended: unsuspended.length,
       federationOrphans: orphans.length,
+      groupChanges: groupChanges?.length ?? 0,
+      attributeChanges: attributeChanges?.length ?? 0,
     },
   };
 }
@@ -241,6 +263,8 @@ export function hasEvents(events: LifecycleEvents): boolean {
     (events.joiners?.length ?? 0) > 0 ||
     (events.leavers?.length ?? 0) > 0 ||
     (events.suspended?.length ?? 0) > 0 ||
-    (events.unsuspended?.length ?? 0) > 0
+    (events.unsuspended?.length ?? 0) > 0 ||
+    (events.groupChanges?.length ?? 0) > 0 ||
+    (events.attributeChanges?.length ?? 0) > 0
   );
 }
