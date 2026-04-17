@@ -86,13 +86,13 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     context: { jobId: String(job.id), syncType: 'full', pluginKey: 'google-workspace' },
   }).catch(() => {});
 
-  // 4. Sync users (paginated)
+  // 4. Sync users (paginated).
+  // Principal lifecycle events (joiner/leaver/suspend/unsuspend) are
+  // computed post-sync by `jml_detect_lifecycle`. This processor only
+  // refreshes the mirror + captures attribute changes for future mover work.
   let userPageToken: string | undefined;
   const seenUserEmails = new Set<string>();
   const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
-  const newJoiners: string[] = [];
-  const newSuspended: string[] = [];
-  const newUnsuspended: string[] = [];
 
   do {
     const page = await fetchUsers(accessToken, domain, userPageToken);
@@ -102,21 +102,6 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
         where: { source_id: sourceId, email: user.primaryEmail },
         select: { department: true, job_title: true, is_suspended: true },
       });
-      if (!existingUser) {
-        // New user not previously in directory — this is a joiner
-        if (!user.suspended) {
-          newJoiners.push(user.primaryEmail);
-        }
-      } else {
-        // Check suspension status change
-        const wasSuspended = (existingUser as any).is_suspended || false;
-        const nowSuspended = user.suspended || false;
-        if (!wasSuspended && nowSuspended) {
-          newSuspended.push(user.primaryEmail);
-        } else if (wasSuspended && !nowSuspended) {
-          newUnsuspended.push(user.primaryEmail);
-        }
-      }
       await upsertGwsUser(prisma, sourceId, tenantId, user);
       // Track attribute changes for mover detection
       if (existingUser) {
@@ -289,54 +274,27 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     },
   }).catch(() => {});
 
-  // 9. Enqueue JML lifecycle processing if there are events to process
+  // 9. Chain to jml_detect_lifecycle. Principal-drift detection runs as its
+  //    own job so it's independently observable, retryable, and skips cleanly
+  //    when the source has no jml_scope configured. Group-membership and
+  //    attribute-change events are NOT forwarded here (principals only).
   const { enqueueJob } = getRuntime();
-  const leaverEmails = toDeactivate.length > 0
-    ? allActiveGws.filter((u: any) => toDeactivate.includes(u.id)).map((u: any) => u.email)
-    : [];
-  const groupChanges = Array.from(groupChangesByUser.entries()).map(([email, changes]) => ({
-    userExternalId: email,
-    userEmail: email,
-    added: changes.added,
-    removed: changes.removed,
-  }));
-
-  const hasLifecycleEvents =
-    newJoiners.length > 0 ||
-    leaverEmails.length > 0 ||
-    newSuspended.length > 0 ||
-    newUnsuspended.length > 0 ||
-    groupChanges.length > 0 ||
-    attributeChanges.length > 0;
-
-  if (enqueueJob && hasLifecycleEvents) {
-    await enqueueJob('jml_process_lifecycle', {
+  if (enqueueJob) {
+    await enqueueJob('jml_detect_lifecycle', {
       tenantId,
       sourceId,
       pluginKey: 'google-workspace',
       triggeredBy: `gws_sync_directory:${job.id}`,
-      lifecycleEvents: {
-        joiners: newJoiners.length > 0 ? newJoiners : undefined,
-        leavers: leaverEmails.length > 0 ? leaverEmails : undefined,
-        suspended: newSuspended.length > 0 ? newSuspended : undefined,
-        unsuspended: newUnsuspended.length > 0 ? newUnsuspended : undefined,
-        groupChanges: groupChanges.length > 0 ? groupChanges : undefined,
-        attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined,
-      },
     }).catch((err: Error) => {
-      logger.error('gws_sync_directory: failed to enqueue jml_process_lifecycle', {
+      logger.error('gws_sync_directory: failed to enqueue jml_detect_lifecycle', {
         tenantId, sourceId, error: err.message,
       });
     });
+  }
 
-    logger.info('gws_sync_directory: enqueued jml_process_lifecycle', {
-      tenantId, sourceId,
-      joiners: newJoiners.length,
-      leavers: leaverEmails.length,
-      suspended: newSuspended.length,
-      unsuspended: newUnsuspended.length,
-      groupChanges: groupChanges.length,
-      attributeChanges: attributeChanges.length,
+  if (groupChangesByUser.size > 0) {
+    logger.info('gws_sync_directory: group membership changes detected (pending mover dispatcher)', {
+      tenantId, sourceId, userCount: groupChangesByUser.size,
     });
   }
 

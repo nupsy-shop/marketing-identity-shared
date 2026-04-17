@@ -63,12 +63,13 @@ interface JobDefinition {
  */
 export const JOB_CATALOG = {
   // ─── Automation (tenant-scoped) ─────────────────────────────────────
-  entra_poll_audit:      { queue: QUEUE_NAMES.AUTOMATION },
-  gws_poll_audit:        { queue: QUEUE_NAMES.AUTOMATION },
-  detect_drift:          { queue: QUEUE_NAMES.AUTOMATION },
-  enforce_retention:     { queue: QUEUE_NAMES.AUTOMATION },
-  discover_assets:       { queue: QUEUE_NAMES.AUTOMATION },
-  jml_process_lifecycle: { queue: QUEUE_NAMES.AUTOMATION },
+  entra_poll_audit:           { queue: QUEUE_NAMES.AUTOMATION },
+  gws_poll_audit:             { queue: QUEUE_NAMES.AUTOMATION },
+  detect_drift:               { queue: QUEUE_NAMES.AUTOMATION },
+  enforce_retention:          { queue: QUEUE_NAMES.AUTOMATION },
+  discover_assets:            { queue: QUEUE_NAMES.AUTOMATION },
+  jml_detect_lifecycle:       { queue: QUEUE_NAMES.AUTOMATION },
+  jml_process_lifecycle:      { queue: QUEUE_NAMES.AUTOMATION },
 
   // ─── Directory Sync (tenant-scoped) ─────────────────────────────────
   entra_sync_directory: { queue: QUEUE_NAMES.DIRECTORY_SYNC },

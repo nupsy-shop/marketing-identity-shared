@@ -99,38 +99,20 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     // 3. Fetch and upsert users
     const seenEmails = new Set<string>();
     const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
-    const newJoiners: string[] = [];
-    const newSuspended: string[] = [];
-    const newUnsuspended: string[] = [];
     const users = await fetchUsers(accessToken);
 
     for (const user of users) {
       const email = (user.mail || user.userPrincipalName)?.toLowerCase();
       if (!email) continue;
 
-      // Capture previous state for change detection (attribute-based mover + suspension)
+      // Capture previous state for attribute-change (mover) detection.
+      // Principal lifecycle events (joiner/leaver/suspend/unsuspend) are
+      // computed post-sync by `jml_detect_lifecycle`, so this processor no
+      // longer emits them directly.
       const existingUser = await prisma.entra_directory_users.findFirst({
         where: { source_id: sourceId, entra_user_id: user.id },
         select: { department: true, job_title: true, is_active: true },
       });
-
-      if (!existingUser) {
-        // New user — joiner (if account is enabled)
-        if (user.accountEnabled !== false) {
-          newJoiners.push(user.id);
-        }
-      } else {
-        // Suspension detection: entra_directory_users only has is_active.
-        // Previous is_active=true + now accountEnabled=false → suspended.
-        // Previous is_active=false + now accountEnabled=true → unsuspended.
-        const wasActive = existingUser.is_active !== false;
-        const nowActive = user.accountEnabled !== false;
-        if (wasActive && !nowActive) {
-          newSuspended.push(user.id);
-        } else if (!wasActive && nowActive) {
-          newUnsuspended.push(user.id);
-        }
-      }
 
       await upsertEntraDirectoryUser(sourceId, tenantId, user);
 
@@ -162,18 +144,17 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       stats.usersUpserted++;
     }
 
-    // 4. Mark users not returned by Graph as inactive
-    // Fetch active set BEFORE deactivating so we can capture leavers' entra_user_ids.
+    // 4. Mark users not returned by Graph as inactive.
+    // Leaver detection is the job of `jml_detect_lifecycle` which compares
+    // the fresh mirror against `integration_identities`.
     const allActiveUsers = await prisma.entra_directory_users.findMany({
       where: { source_id: sourceId, is_active: true },
-      select: { email: true, entra_user_id: true },
+      select: { email: true },
     });
 
-    const toDeactivateIds: string[] = []; // entra_user_ids of leavers (for lifecycle payload)
     const toDeactivateEmails: string[] = [];
     for (const u of allActiveUsers) {
       if (!seenEmails.has(u.email)) {
-        if (u.entra_user_id) toDeactivateIds.push(u.entra_user_id);
         toDeactivateEmails.push(u.email);
       }
     }
@@ -280,58 +261,31 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       },
     }).catch(() => {});
 
-    // 10. Enqueue JML lifecycle processing if there are events to process
+    // 10. Chain to jml_detect_lifecycle. Principal lifecycle detection
+    //     (joiner/leaver/suspend/unsuspend) runs post-sync as its own job so
+    //     it's independently observable and retryable, and so it can be
+    //     skipped cleanly when the source has no jml_scope configured.
+    //     Attribute-change (mover) and group-membership events are NOT
+    //     carried here — they remain a sync-time concern and are logged
+    //     above via `attributeChanges` / `groupChangesByUser` for future
+    //     mover-dispatcher work.
     const { enqueueJob } = getRuntime();
-
-    // Build groupChanges payload: entra_user_id is used as userExternalId for
-    // downstream JML processors — consistent with the previous external_id field
-    // which also held the Graph user GUID.
-    const groupChanges = Array.from(groupChangesByUser.entries()).map(([entraUserId, changes]) => {
-      const matchedUser = users.find(u => u.id === entraUserId);
-      return {
-        userExternalId: entraUserId,
-        userEmail: (matchedUser?.mail || matchedUser?.userPrincipalName || '').toLowerCase(),
-        added: changes.added,
-        removed: changes.removed,
-      };
-    });
-
-    const hasLifecycleEvents =
-      newJoiners.length > 0 ||
-      toDeactivateIds.length > 0 ||
-      newSuspended.length > 0 ||
-      newUnsuspended.length > 0 ||
-      groupChanges.length > 0 ||
-      attributeChanges.length > 0;
-
-    if (enqueueJob && hasLifecycleEvents) {
-      await enqueueJob('jml_process_lifecycle', {
+    if (enqueueJob) {
+      await enqueueJob('jml_detect_lifecycle', {
         tenantId,
         sourceId,
         pluginKey: 'entra-id',
         triggeredBy: `entra_sync_directory:${job.id}`,
-        lifecycleEvents: {
-          joiners: newJoiners.length > 0 ? newJoiners : undefined,
-          leavers: toDeactivateIds.length > 0 ? toDeactivateIds : undefined,
-          suspended: newSuspended.length > 0 ? newSuspended : undefined,
-          unsuspended: newUnsuspended.length > 0 ? newUnsuspended : undefined,
-          groupChanges: groupChanges.length > 0 ? groupChanges : undefined,
-          attributeChanges: attributeChanges.length > 0 ? attributeChanges : undefined,
-        },
       }).catch((err: Error) => {
-        logger.error('entra_sync_directory: failed to enqueue jml_process_lifecycle', {
+        logger.error('entra_sync_directory: failed to enqueue jml_detect_lifecycle', {
           tenantId, sourceId, error: err.message,
         });
       });
+    }
 
-      logger.info('entra_sync_directory: enqueued jml_process_lifecycle', {
-        tenantId, sourceId,
-        joiners: newJoiners.length,
-        leavers: toDeactivateIds.length,
-        suspended: newSuspended.length,
-        unsuspended: newUnsuspended.length,
-        groupChanges: groupChanges.length,
-        attributeChanges: attributeChanges.length,
+    if (groupChangesByUser.size > 0) {
+      logger.info('entra_sync_directory: group membership changes detected (pending mover dispatcher)', {
+        tenantId, sourceId, userCount: groupChangesByUser.size,
       });
     }
 
