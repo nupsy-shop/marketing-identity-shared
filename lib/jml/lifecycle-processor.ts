@@ -11,13 +11,13 @@
  */
 
 import { getRuntime } from '../runtime.js';
+import { dispatchNotification } from '../notifications/dispatch.js';
 import {
   resolveJoinerAction,
   resolveLeaverAction,
   resolveSuspensionAction,
   resolveMoverGroupAction,
   resolveMoverAttributeAction,
-  resolveNotifications,
   type ResolvedAction,
 } from './policy-action-map.js';
 
@@ -265,117 +265,81 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
 
   let enqueued = 0;
 
-  const dispatch = async (
+  const dispatchPrimary = async (
     principal: string,
     primary: ResolvedAction | null,
-    notifications: ResolvedAction[],
     kind: 'joiner' | 'leaver' | 'suspension' | 'mover',
   ): Promise<void> => {
-    const jobs: ResolvedAction[] = [];
-    if (primary) jobs.push(primary);
-    jobs.push(...notifications);
-    for (const action of jobs) {
-      const id = await enqueueJob(action.jobType, {
-        tenantId: agencyId,
-        sourceId,
-        pluginKey,
-        principal,
-        kind,
-        triggeredBy: 'jml_process_lifecycle',
-        ...(action.extra ?? {}),
-      });
-      if (id) enqueued++;
-    }
+    if (!primary) return;
+    const id = await enqueueJob(primary.jobType, {
+      tenantId: agencyId,
+      sourceId,
+      pluginKey,
+      principal,
+      kind,
+      triggeredBy: 'jml_process_lifecycle',
+      ...(primary.extra ?? {}),
+    });
+    if (id) enqueued++;
   };
 
+  // Primary per-user action jobs. Notifications are emitted below via
+  // dispatchNotification so routing is driven by the agency's
+  // notification_channels config rather than hardcoded email_send jobs.
   for (const email of filteredJoiners) {
-    const primary = resolveJoinerAction(policies.joiner?.action as never, pluginKey);
-    const notifs = resolveNotifications(policies.joiner, 'joiner');
-    await dispatch(email, primary, notifs, 'joiner');
+    await dispatchPrimary(email, resolveJoinerAction(policies.joiner?.action as never, pluginKey), 'joiner');
   }
-
   for (const email of filteredLeavers) {
-    const primary = resolveLeaverAction(policies.leaver?.action as never, pluginKey);
-    const notifs = resolveNotifications(policies.leaver, 'leaver');
-    await dispatch(email, primary, notifs, 'leaver');
+    await dispatchPrimary(email, resolveLeaverAction(policies.leaver?.action as never, pluginKey), 'leaver');
   }
-
   for (const email of filteredSuspended) {
-    const primary = resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'suspend');
-    const notifs = resolveNotifications(policies.suspension, 'suspension');
-    await dispatch(email, primary, notifs, 'suspension');
+    await dispatchPrimary(email, resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'suspend'), 'suspension');
   }
-
   for (const email of filteredUnsuspended) {
-    const primary = resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'unsuspend');
-    const notifs = resolveNotifications(policies.suspension, 'suspension');
-    await dispatch(email, primary, notifs, 'suspension');
+    await dispatchPrimary(email, resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'unsuspend'), 'suspension');
   }
 
-  // ── Mover: group-membership changes ──
-  //    One primary job per added group and per removed group, plus the
-  //    policy's notify_admins / notify_manager channels if configured.
   for (const change of filteredGroupChanges) {
     const principal = change.userEmail || change.userExternalId || change.userId || '';
-    const notifs = resolveNotifications(policies.mover, 'mover');
-
-    for (const groupId of change.added ?? []) {
-      const primary = resolveMoverGroupAction(
-        policies.mover?.on_group_addition?.action as never,
-        pluginKey, 'added',
-      );
-      await dispatch(principal, primary, notifs, 'mover');
-      void groupId;
+    for (const _groupId of change.added ?? []) {
+      await dispatchPrimary(principal, resolveMoverGroupAction(
+        policies.mover?.on_group_addition?.action as never, pluginKey, 'added',
+      ), 'mover');
+      void _groupId;
     }
-    for (const groupId of change.removed ?? []) {
-      const primary = resolveMoverGroupAction(
-        policies.mover?.on_group_removal?.action as never,
-        pluginKey, 'removed',
-      );
-      await dispatch(principal, primary, notifs, 'mover');
-      void groupId;
+    for (const _groupId of change.removed ?? []) {
+      await dispatchPrimary(principal, resolveMoverGroupAction(
+        policies.mover?.on_group_removal?.action as never, pluginKey, 'removed',
+      ), 'mover');
+      void _groupId;
     }
   }
 
-  // ── Mover: attribute changes (dept / title) ──
-  //    Each attribute drift triggers one iam_update_identity to bring
-  //    Keycloak in line with the directory, plus mover notifications.
   const attributeChanges = events.attributeChanges ?? [];
   for (const change of attributeChanges) {
     const principal = change.userEmail || change.userExternalId;
-    const primary = resolveMoverAttributeAction(policies.mover, pluginKey);
-    const notifs = resolveNotifications(policies.mover, 'mover');
-    await dispatch(principal, primary, notifs, 'mover');
+    await dispatchPrimary(principal, resolveMoverAttributeAction(policies.mover, pluginKey), 'mover');
   }
 
   processed = totalFiltered + filteredGroupChanges.length + attributeChanges.length;
 
-  // 4. In-app notification summaries for agency admins. One row per admin
-  //    per kind when the kind had events AND the policy's notify_admins
-  //    flag is set. Aggregated so a 100-user joiner batch doesn't flood the
-  //    inbox with 100 rows per admin.
-  await writeInAppSummaries({
-    agencyId,
-    pluginKey,
-    sourceId,
-    summaries: [
-      policies.joiner?.notifyAdmins && filteredJoiners.length > 0
-        ? { kind: 'joiner', count: filteredJoiners.length }
-        : null,
-      policies.leaver?.notify_admins && filteredLeavers.length > 0
-        ? { kind: 'leaver', count: filteredLeavers.length }
-        : null,
-      policies.suspension?.notify_admins && filteredSuspended.length > 0
-        ? { kind: 'suspended', count: filteredSuspended.length }
-        : null,
-      policies.suspension?.notify_admins && filteredUnsuspended.length > 0
-        ? { kind: 'unsuspended', count: filteredUnsuspended.length }
-        : null,
-      policies.mover?.notify_admins && (filteredGroupChanges.length + attributeChanges.length) > 0
-        ? { kind: 'mover', count: filteredGroupChanges.length + attributeChanges.length }
-        : null,
-    ].filter((s): s is { kind: JmlKind; count: number } => s !== null),
-  });
+  // 4. Emit one aggregated notification event per non-empty kind. The
+  //    dispatcher reads the agency's notification_channels and fans out to
+  //    every channel that subscribes to `jml.*` or the specific event.
+  //    Batching per kind (not per principal) avoids flooding channels when
+  //    a large sync lands dozens of lifecycle events at once.
+  await emitLifecycleEvent('jml.joiner',      filteredJoiners,      { agencyId, sourceId, pluginKey });
+  await emitLifecycleEvent('jml.leaver',      filteredLeavers,      { agencyId, sourceId, pluginKey });
+  await emitLifecycleEvent('jml.suspended',   filteredSuspended,    { agencyId, sourceId, pluginKey });
+  await emitLifecycleEvent('jml.unsuspended', filteredUnsuspended,  { agencyId, sourceId, pluginKey });
+  const moverCount = filteredGroupChanges.length + attributeChanges.length;
+  if (moverCount > 0) {
+    await dispatchNotification(agencyId, 'jml.mover', {
+      sourceId, pluginKey, count: moverCount,
+      groupChanges: filteredGroupChanges.length,
+      attributeChanges: attributeChanges.length,
+    });
+  }
 
   logger.info('[JML] Lifecycle events dispatched', {
     agencyId, sourceId, pluginKey,
@@ -396,73 +360,18 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
   };
 }
 
-// ─── In-app notification summaries ──────────────────────────────────────────
+// ─── Event emission helper ──────────────────────────────────────────────────
 
-type JmlKind = 'joiner' | 'leaver' | 'suspended' | 'unsuspended' | 'mover';
-
-const KIND_TITLES: Record<JmlKind, string> = {
-  joiner: 'New joiners detected',
-  leaver: 'Leavers detected',
-  suspended: 'Accounts suspended in directory',
-  unsuspended: 'Accounts unsuspended in directory',
-  mover: 'Mover events detected',
-};
-
-async function writeInAppSummaries(params: {
-  agencyId: string;
-  sourceId: string;
-  pluginKey: string;
-  summaries: Array<{ kind: JmlKind; count: number }>;
-}): Promise<void> {
-  const { agencyId, sourceId, pluginKey, summaries } = params;
-  if (summaries.length === 0) return;
-  const { prisma, logger } = getRuntime();
-
-  // Agency admins and owners receive JML summaries. Wrapped so test hosts
-  // that only stub the queues the processor dispatches to don't crash.
-  let admins: Array<{ id: string }> = [];
-  try {
-    admins = await prisma.users.findMany({
-      where: {
-        agency_id: agencyId,
-        is_active: true,
-        role: { in: ['agency_admin', 'agency_owner'] },
-      },
-      select: { id: true },
-    });
-  } catch (err) {
-    logger.warn('[JML] failed to load admin recipients for in-app summary', {
-      agencyId, error: (err as Error).message,
-    });
-    return;
-  }
-  if (admins.length === 0) return;
-
-  const rows = [];
-  for (const s of summaries) {
-    const title = KIND_TITLES[s.kind];
-    const body =
-      s.count === 1
-        ? `1 ${s.kind} event processed from ${pluginKey}.`
-        : `${s.count} ${s.kind} events processed from ${pluginKey}.`;
-    for (const admin of admins) {
-      rows.push({
-        agency_id: agencyId,
-        user_id: admin.id,
-        event: `jml.${s.kind}`,
-        title,
-        body,
-        severity: 'info',
-        payload: { sourceId, pluginKey, kind: s.kind, count: s.count },
-      });
-    }
-  }
-
-  try {
-    await prisma.in_app_notifications.createMany({ data: rows });
-  } catch (err) {
-    logger.warn('[JML] failed to write in-app notification summaries', {
-      agencyId, error: (err as Error).message,
-    });
-  }
+async function emitLifecycleEvent(
+  eventType: string,
+  principals: string[],
+  ctx: { agencyId: string; sourceId: string; pluginKey: string },
+): Promise<void> {
+  if (principals.length === 0) return;
+  await dispatchNotification(ctx.agencyId, eventType, {
+    sourceId: ctx.sourceId,
+    pluginKey: ctx.pluginKey,
+    count: principals.length,
+    principals: principals.slice(0, 50),
+  });
 }

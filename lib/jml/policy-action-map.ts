@@ -176,47 +176,13 @@ export function resolveMoverGroupAction(
 }
 
 /**
- * Attribute changes (department, job_title, etc.) don't have a dedicated
- * action today — they fan out only as notifications via the mover policy's
- * notify_* flags. Callers pass the whole `policies.mover` object to
- * `resolveNotifications(..., 'mover')` and enqueue a `iam_update_identity`
- * audit trail separately if they want attribute sync to Keycloak.
- *
- * Returning the IAM update job here keeps the mirror ↔ Keycloak attribute
- * state in sync without demanding a per-policy action string.
+ * Attribute changes bring Keycloak into alignment with the directory mirror.
+ * Per-event notifications are routed through `dispatchNotification` based on
+ * the agency's configured notification_channels rather than hardcoded jobs.
  */
 export function resolveMoverAttributeAction(
   _policy: { notify_admins?: boolean; notify_manager?: boolean } | undefined,
   _pluginKey: string,
 ): ResolvedAction | null {
-  // Attribute drift should always bring Keycloak into alignment with the
-  // directory mirror. Notifications are layered on via resolveNotifications().
   return { jobType: 'iam_update_identity' };
-}
-
-/**
- * Notification fan-out. Returns the set of notification jobs to enqueue in
- * addition to the primary action. Separate from action resolution because
- * the same lifecycle event can both fire an action and send notifications.
- */
-export function resolveNotifications(
-  policy: {
-    notify_admins?: boolean;
-    notifyAdmins?: boolean;
-    notify_manager?: boolean;
-    notifyManager?: boolean;
-  } | undefined,
-  kind: 'joiner' | 'leaver' | 'suspension' | 'mover',
-): ResolvedAction[] {
-  if (!policy) return [];
-  const out: ResolvedAction[] = [];
-  const adminsFlag = policy.notify_admins ?? policy.notifyAdmins ?? false;
-  if (adminsFlag) {
-    out.push({ jobType: 'email_send', extra: { template: `jml.${kind}.notify_admins` } });
-  }
-  const managerFlag = policy.notify_manager ?? policy.notifyManager ?? false;
-  if (managerFlag) {
-    out.push({ jobType: 'email_send', extra: { template: `jml.${kind}.notify_manager` } });
-  }
-  return out;
 }
