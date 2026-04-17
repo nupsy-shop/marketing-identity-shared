@@ -1,27 +1,26 @@
 /**
  * JML Detect Lifecycle — Shared Library
  *
- * Compares the fresh directory mirror (just populated by a sync processor)
- * against `integration_identities` (updated by `jml_process_lifecycle` after
- * the last cycle) to produce principal-lifecycle events:
+ * Computes principal-lifecycle events (joiner / leaver / suspend / unsuspend)
+ * for a single identity source. The drift adapter is the only source of
+ * truth for provider-side state (directory users, scope, federation
+ * orphans); this module joins the adapter's view with the local `users`
+ * table to classify lifecycle events. Nothing here duplicates logic the
+ * adapter already owns.
  *
- *   joiner       — new user in the directory with no matching identity
- *   leaver       — identity exists but the user is no longer in the directory
- *   suspended    — identity.isActive=true  but mirror.is_active=false
- *   unsuspended  — identity.isActive=false but mirror.is_active=true
+ * Classification (in-scope only):
  *
- * Plus federation orphans surfaced by the drift adapter (users living in the
- * federated space — GWS managed OU, Entra federated domain — that are not
- * tracked as identities). Orphans are merged into `leavers` so the downstream
- * policy engine can decide how to reconcile them.
+ *   joiner       — directory user in scope, no matching local user
+ *   leaver       — local user in scope, no matching directory user
+ *   suspended    — directory user inactive, local user still active
+ *   unsuspended  — directory user active, local user inactive
  *
- * Group membership and attribute-change detection are intentionally out of
- * scope here — this module is strictly principal-lifecycle. Mover events
- * driven by attribute/group deltas live in `mover-detector.ts`.
+ * Federation orphans surfaced by the adapter are merged into `leavers` so
+ * the downstream policy engine applies reconciliation policy uniformly.
  *
- * Called by the Bull worker's `jml_detect_lifecycle` processor. On completion
- * it enqueues `jml_process_lifecycle` with the computed batch; `jml_process_lifecycle`
- * owns scope filtering, guardrails, and action dispatch.
+ * Mover events (group-membership adds/removals, attribute diffs) are
+ * captured by the sync processor (only it sees before/after) and passed
+ * through this job to jml_process_lifecycle.
  */
 
 import { getRuntime } from '../runtime.js';
@@ -42,13 +41,6 @@ export interface DetectLifecycleParams {
   tenantId: string;
   sourceId: string;
   pluginKey: string;
-  /**
-   * Mover events captured by the sync processor during upsert (group-
-   * membership added/removed, attribute diffs). Detect passes these through
-   * to `jml_process_lifecycle` alongside the principal-drift events it
-   * computes from mirror-vs-identities, because mover deltas require
-   * before/after state that only the sync processor observes.
-   */
   groupChanges?: GroupChange[];
   attributeChanges?: AttributeChange[];
 }
@@ -74,36 +66,23 @@ export type DetectLifecycleResult =
       reason: string;
     };
 
-// ─── Internal row shapes ───────────────────────────────────────────────────
+// ─── Internal row shape ────────────────────────────────────────────────────
 
-type IdentityRow = {
-  id: string;
-  identifier: string;   // lowercase email for IdP-synced users
-  isActive: boolean;
-};
-
-type SourceRow = {
-  id: string;
-  plugin_key: string;
-  connection_config: ConnectionConfigShape | null;
-  jml_scope: JmlScopeShape;
+type LocalUserRow = {
+  email: string;
+  is_active: boolean | null;
 };
 
 // ─── Entry point ───────────────────────────────────────────────────────────
 
-/**
- * Run principal-drift detection for a single identity source. Pure, no
- * enqueue. The caller (worker processor) is responsible for enqueueing
- * `jml_process_lifecycle` when status='completed' and any bucket is non-empty.
- */
 export async function detectLifecycle(
   params: DetectLifecycleParams,
 ): Promise<DetectLifecycleResult> {
   const { tenantId, sourceId, pluginKey, groupChanges, attributeChanges } = params;
   const { prisma, logger } = getRuntime();
 
-  // 1. Load the identity source
-  const source: SourceRow | null = await prisma.identity_sources.findFirst({
+  // 1. Load source
+  const source = await prisma.identity_sources.findFirst({
     where: { id: sourceId, agency_id: tenantId },
     select: {
       id: true,
@@ -121,9 +100,7 @@ export async function detectLifecycle(
     };
   }
 
-  // 2. JML enabled == jml_scope configured. The JML setup wizard gates scope
-  //    configuration behind the jmlAutomation Lago entitlement, so a non-null
-  //    jml_scope implies both entitlement and operator intent.
+  // 2. JML is enabled iff jml_scope is configured
   if (source.jml_scope == null) {
     return {
       status: 'skipped',
@@ -132,7 +109,7 @@ export async function detectLifecycle(
     };
   }
 
-  // 3. Resolve drift adapter for this plugin
+  // 3. Resolve adapter
   let adapter;
   try {
     adapter = getDriftAdapter(pluginKey);
@@ -144,67 +121,66 @@ export async function detectLifecycle(
     };
   }
 
-  // 4. Snapshot: directory mirror (the "after" — fresh from the sync that
-  //    just completed).
-  const directoryUsers = await adapter.findAllDirectoryUsers(sourceId, tenantId);
-  const activeDirEmails = new Set<string>();
-  const inactiveDirEmails = new Set<string>();
-  for (const u of directoryUsers) {
-    const key = u.email.toLowerCase();
-    if (u.isActive) activeDirEmails.add(key);
-    else inactiveDirEmails.add(key);
-  }
+  const scope = source.jml_scope as JmlScopeShape;
 
-  // 5. Snapshot: identities (the "before" — reflects last JML-applied state
-  //    since jml_process_lifecycle is what mutates integration_identities).
-  const identities: IdentityRow[] = await prisma.integration_identities.findMany({
-    where: { agency_id: tenantId, platform_key: pluginKey },
-    select: { id: true, identifier: true, isActive: true },
+  // 4. Provider-side state (adapter is the source of truth)
+  const providerUsers = await adapter.findAllDirectoryUsers(sourceId, tenantId);
+  const scopedEmails = await adapter.resolveJmlScopeEmails(
+    sourceId,
+    tenantId,
+    scope,
+  );
+  const inScope = (emailLc: string): boolean =>
+    scopedEmails === null ? true : scopedEmails.has(emailLc);
+
+  // 5. Local users (agency-wide)
+  const localUsers: LocalUserRow[] = await prisma.users.findMany({
+    where: { agency_id: tenantId },
+    select: { email: true, is_active: true },
   });
-  const identityByEmail = new Map<string, IdentityRow>(
-    identities.map((i) => [i.identifier.toLowerCase(), i]),
+  const localByEmail = new Map<string, LocalUserRow>(
+    localUsers.map((u) => [u.email.toLowerCase(), u]),
   );
 
-  // 6. Diff
+  // 6. Bucket provider users in scope
   const joiners: string[] = [];
-  const leavers: string[] = [];
   const suspended: string[] = [];
   const unsuspended: string[] = [];
+  const providerEmails = new Set<string>();
 
-  // Joiners: active in directory, no matching identity
-  for (const email of activeDirEmails) {
-    if (!identityByEmail.has(email)) joiners.push(email);
+  for (const u of providerUsers) {
+    const emailLc = u.email.toLowerCase();
+    if (!inScope(emailLc)) continue;
+    providerEmails.add(emailLc);
+
+    const local = localByEmail.get(emailLc);
+    if (!local) {
+      // In scope + not locally known → joiner (only when provider says active)
+      if (u.isActive) joiners.push(u.email);
+      continue;
+    }
+
+    if (u.isActive && local.is_active === false) {
+      unsuspended.push(u.email);
+    } else if (!u.isActive && local.is_active !== false) {
+      suspended.push(u.email);
+    }
   }
 
-  // Leaver / suspend / unsuspend: walk identities and classify
-  for (const [email, identity] of identityByEmail) {
-    const inActiveDir = activeDirEmails.has(email);
-    const inInactiveDir = inactiveDirEmails.has(email);
-
-    if (!inActiveDir && !inInactiveDir) {
-      // Gone from directory entirely
-      if (identity.isActive) leavers.push(email);
-      continue;
-    }
-
-    if (identity.isActive && inInactiveDir) {
-      suspended.push(email);
-      continue;
-    }
-
-    if (!identity.isActive && inActiveDir) {
-      unsuspended.push(email);
-      continue;
-    }
-    // else: identity and mirror agree → no change
+  // 7. Leavers — local users in scope with no matching provider row
+  const leavers: string[] = [];
+  for (const local of localUsers) {
+    const emailLc = local.email.toLowerCase();
+    if (!inScope(emailLc)) continue;
+    if (providerEmails.has(emailLc)) continue;
+    if (local.is_active === false) continue;
+    leavers.push(local.email);
   }
 
-  // 7. Federation orphans — users in the federated space with no identity.
-  //    Merged into leavers so the policy engine can apply the reconciliation
-  //    policy uniformly.
-  const cfg = source.connection_config ?? {};
+  // 8. Federation orphans — merged into leavers (case-insensitive dedup)
+  const cfg = (source.connection_config ?? {}) as ConnectionConfigShape;
   const excludeEmails = new Set(
-    identities.map((i) => i.identifier.toLowerCase()),
+    localUsers.map((u) => u.email.toLowerCase()),
   );
   const orphans = await adapter.findFederationOrphans(
     sourceId,
@@ -212,9 +188,13 @@ export async function detectLifecycle(
     cfg,
     excludeEmails,
   );
+  const leaversLc = new Set(leavers.map((e) => e.toLowerCase()));
   for (const o of orphans) {
-    const key = o.email.toLowerCase();
-    if (!leavers.includes(key)) leavers.push(key);
+    const keyLc = o.email.toLowerCase();
+    if (!leaversLc.has(keyLc)) {
+      leavers.push(o.email);
+      leaversLc.add(keyLc);
+    }
   }
 
   const events: LifecycleEvents = {
@@ -256,7 +236,7 @@ export async function detectLifecycle(
   };
 }
 
-// ─── Predicate: does this result carry any event to process? ───────────────
+// ─── Predicate ─────────────────────────────────────────────────────────────
 
 export function hasEvents(events: LifecycleEvents): boolean {
   return (
