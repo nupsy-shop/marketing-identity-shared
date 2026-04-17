@@ -10,6 +10,7 @@
 
 import crypto from 'crypto';
 import { bulkIndex, ping, ensureCurrentIndex } from './client.js';
+import { logger } from '../logger.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -93,7 +94,7 @@ async function checkES(): Promise<boolean> {
 function startFlushTimer(): void {
   if (_flushTimer) return;
   _flushTimer = setInterval(() => {
-    if (_buffer.length > 0) flush().catch(err => console.error('[Audit] Flush error:', (err as Error).message));
+    if (_buffer.length > 0) flush().catch(err => logger.error('[Audit] Flush error', { err }));
   }, FLUSH_INTERVAL_MS);
   if (_flushTimer.unref) _flushTimer.unref();
 }
@@ -115,17 +116,21 @@ async function flush(): Promise<void> {
           const idx = i.index as Record<string, unknown> | undefined;
           return idx?.error;
         }) || [];
-        console.error(`[Audit] Bulk index had ${failed.length} errors`);
+        logger.error('[Audit] Bulk index had errors', { failedCount: failed.length });
       }
     } catch (err: unknown) {
-      console.error('[Audit] Bulk index failed:', (err as Error).message);
+      logger.error('[Audit] Bulk index failed', { err });
       _esAvailable = false;
       for (const event of batch) {
-        console.error('[Audit] Lost event (ES down):', JSON.stringify({ eventId: event.eventId, eventType: event.eventType, agencyId: event.agency?.id }));
+        logger.error('[Audit] Lost event (ES down)', {
+          eventId: event.eventId,
+          eventType: event.eventType,
+          agencyId: event.agency?.id,
+        });
       }
     }
   } else {
-    console.warn(`[Audit] ES unavailable, dropping ${batch.length} events`);
+    logger.warn('[Audit] ES unavailable, dropping events', { count: batch.length });
   }
 }
 
@@ -136,7 +141,7 @@ async function init(): Promise<void> {
   _initialized = true;
 
   if (!process.env.SEARCHBOX_URL) {
-    console.warn('[Audit] SEARCHBOX_URL not set — audit events will be dropped');
+    logger.warn('[Audit] SEARCHBOX_URL not set — audit events will be dropped');
     _esAvailable = false;
     return;
   }
@@ -147,7 +152,7 @@ async function init(): Promise<void> {
       await ensureCurrentIndex();
     }
   } catch (err: unknown) {
-    console.warn('[Audit] ES init failed — events will be dropped until ES recovers:', (err as Error).message);
+    logger.warn('[Audit] ES init failed — events will be dropped until ES recovers', { err });
     _esAvailable = false;
   }
 
@@ -201,7 +206,7 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
 
   // Flush immediately if buffer is full
   if (_buffer.length >= BUFFER_SIZE) {
-    flush().catch(err => console.error('[Audit] Immediate flush error:', (err as Error).message));
+    flush().catch(err => logger.error('[Audit] Immediate flush error', { err }));
   }
 
   // Fire-and-forget: dispatch notifications for actionable events
@@ -247,7 +252,7 @@ async function maybeNotify(event: InternalAuditEvent): Promise<void> {
       actor: event.actor?.email,
     });
   } catch (err: unknown) {
-    console.error('[Audit] Notification dispatch error (non-fatal):', (err as Error).message);
+    logger.error('[Audit] Notification dispatch error (non-fatal)', { err });
   }
 }
 

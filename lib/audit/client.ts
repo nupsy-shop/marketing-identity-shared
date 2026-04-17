@@ -5,6 +5,8 @@
  * Provides low-level index management and document operations.
  */
 
+import { logger } from '../logger';
+
 export interface SearchOptions {
   index?: string;
   body?: Record<string, unknown>;
@@ -127,12 +129,12 @@ export async function ensureIndexTemplate(): Promise<void> {
     });
     if (!res.ok) {
       const text = await res.text();
-      console.error('[Audit ES] Failed to create index template:', res.status, text);
+      logger.error('[Audit ES] Failed to create index template', { status: res.status, body: text });
     } else {
-      console.log('[Audit ES] Index template ensured');
+      logger.info('[Audit ES] Index template ensured');
     }
   } catch (err: unknown) {
-    console.error('[Audit ES] Template setup error:', (err as Error).message);
+    logger.error('[Audit ES] Template setup error', { err });
   }
 }
 
@@ -144,13 +146,13 @@ export async function ensureCurrentIndex(): Promise<void> {
       const create = await esFetch(`/${idx}`, { method: 'PUT' });
       if (!create.ok) {
         const text = await create.text();
-        console.error('[Audit ES] Failed to create index', idx, ':', text);
+        logger.error('[Audit ES] Failed to create index', { index: idx, body: text });
       } else {
-        console.log('[Audit ES] Created index:', idx);
+        logger.info('[Audit ES] Created index', { index: idx });
       }
     }
   } catch (err: unknown) {
-    console.error('[Audit ES] Index check error:', (err as Error).message);
+    logger.error('[Audit ES] Index check error', { err });
   }
 }
 

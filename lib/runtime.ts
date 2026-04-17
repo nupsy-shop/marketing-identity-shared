@@ -15,14 +15,26 @@
  *   const { prisma, logger } = getRuntime();
  */
 
+/**
+ * Logger surface required by shared processors.
+ *
+ * Hosts (web app, bull worker) bind a Pino-backed logger that supports
+ * `.child(bindings)` — the worker uses this to scope every job log line
+ * with `jobId` / `jobType` automatically.
+ */
+export interface RuntimeLogger {
+  info(msg: string, ctx?: Record<string, unknown>): void;
+  warn(msg: string, ctx?: Record<string, unknown>): void;
+  error(msg: string, ctx?: Record<string, unknown>): void;
+  debug(msg: string, ctx?: Record<string, unknown>): void;
+  // Optional so hosts that haven't upgraded to a child-capable logger still
+  // satisfy the contract. Pino-backed hosts always provide it.
+  child?(bindings: Record<string, unknown>): RuntimeLogger;
+}
+
 export interface RuntimeServices {
   prisma: any;
-  logger: {
-    info(msg: string, ctx?: Record<string, unknown>): void;
-    warn(msg: string, ctx?: Record<string, unknown>): void;
-    error(msg: string, ctx?: Record<string, unknown>): void;
-    debug(msg: string, ctx?: Record<string, unknown>): void;
-  };
+  logger: RuntimeLogger;
   /**
    * Optional job enqueue callback provided by the host.
    * Allows processors to dispatch follow-up jobs (e.g. jml_process_lifecycle)
