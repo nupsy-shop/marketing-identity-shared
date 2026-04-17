@@ -350,6 +350,33 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
 
   processed = totalFiltered + filteredGroupChanges.length + attributeChanges.length;
 
+  // 4. In-app notification summaries for agency admins. One row per admin
+  //    per kind when the kind had events AND the policy's notify_admins
+  //    flag is set. Aggregated so a 100-user joiner batch doesn't flood the
+  //    inbox with 100 rows per admin.
+  await writeInAppSummaries({
+    agencyId,
+    pluginKey,
+    sourceId,
+    summaries: [
+      policies.joiner?.notifyAdmins && filteredJoiners.length > 0
+        ? { kind: 'joiner', count: filteredJoiners.length }
+        : null,
+      policies.leaver?.notify_admins && filteredLeavers.length > 0
+        ? { kind: 'leaver', count: filteredLeavers.length }
+        : null,
+      policies.suspension?.notify_admins && filteredSuspended.length > 0
+        ? { kind: 'suspended', count: filteredSuspended.length }
+        : null,
+      policies.suspension?.notify_admins && filteredUnsuspended.length > 0
+        ? { kind: 'unsuspended', count: filteredUnsuspended.length }
+        : null,
+      policies.mover?.notify_admins && (filteredGroupChanges.length + attributeChanges.length) > 0
+        ? { kind: 'mover', count: filteredGroupChanges.length + attributeChanges.length }
+        : null,
+    ].filter((s): s is { kind: JmlKind; count: number } => s !== null),
+  });
+
   logger.info('[JML] Lifecycle events dispatched', {
     agencyId, sourceId, pluginKey,
     processed, skippedByScope, enqueued,
@@ -367,4 +394,75 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
     skippedByGuardrail: false,
     enqueued,
   };
+}
+
+// ─── In-app notification summaries ──────────────────────────────────────────
+
+type JmlKind = 'joiner' | 'leaver' | 'suspended' | 'unsuspended' | 'mover';
+
+const KIND_TITLES: Record<JmlKind, string> = {
+  joiner: 'New joiners detected',
+  leaver: 'Leavers detected',
+  suspended: 'Accounts suspended in directory',
+  unsuspended: 'Accounts unsuspended in directory',
+  mover: 'Mover events detected',
+};
+
+async function writeInAppSummaries(params: {
+  agencyId: string;
+  sourceId: string;
+  pluginKey: string;
+  summaries: Array<{ kind: JmlKind; count: number }>;
+}): Promise<void> {
+  const { agencyId, sourceId, pluginKey, summaries } = params;
+  if (summaries.length === 0) return;
+  const { prisma, logger } = getRuntime();
+
+  // Agency admins and owners receive JML summaries. Wrapped so test hosts
+  // that only stub the queues the processor dispatches to don't crash.
+  let admins: Array<{ id: string }> = [];
+  try {
+    admins = await prisma.users.findMany({
+      where: {
+        agency_id: agencyId,
+        is_active: true,
+        role: { in: ['agency_admin', 'agency_owner'] },
+      },
+      select: { id: true },
+    });
+  } catch (err) {
+    logger.warn('[JML] failed to load admin recipients for in-app summary', {
+      agencyId, error: (err as Error).message,
+    });
+    return;
+  }
+  if (admins.length === 0) return;
+
+  const rows = [];
+  for (const s of summaries) {
+    const title = KIND_TITLES[s.kind];
+    const body =
+      s.count === 1
+        ? `1 ${s.kind} event processed from ${pluginKey}.`
+        : `${s.count} ${s.kind} events processed from ${pluginKey}.`;
+    for (const admin of admins) {
+      rows.push({
+        agency_id: agencyId,
+        user_id: admin.id,
+        event: `jml.${s.kind}`,
+        title,
+        body,
+        severity: 'info',
+        payload: { sourceId, pluginKey, kind: s.kind, count: s.count },
+      });
+    }
+  }
+
+  try {
+    await prisma.in_app_notifications.createMany({ data: rows });
+  } catch (err) {
+    logger.warn('[JML] failed to write in-app notification summaries', {
+      agencyId, error: (err as Error).message,
+    });
+  }
 }
