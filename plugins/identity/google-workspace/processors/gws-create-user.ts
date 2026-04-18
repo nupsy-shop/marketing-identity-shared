@@ -245,14 +245,31 @@ async function updateProviderStatus(
   provider: string,
   statusData: Record<string, unknown>,
 ): Promise<void> {
+  // Load current status first so we merge onto (not replace) the existing
+  // providers_status JSON. If the identity has already been deleted — which
+  // happens when a test's afterAll cleans up before the async GWS job
+  // finishes — exit cleanly instead of letting the subsequent update crash
+  // the worker with `PrismaClientKnownRequestError (P2025): No record was
+  // found for an update.`
   const identity = await prisma.integration_identities.findUnique({
     where: { id: identityId },
     select: { provisioning_providers_status: true },
   });
 
-  const existing = (identity?.provisioning_providers_status || {}) as Record<string, unknown>;
+  if (!identity) {
+    const { logger } = getRuntime();
+    logger.warn('gws_create_user: identity deleted before status update — skipping', {
+      identityId, provider,
+    });
+    return;
+  }
 
-  await prisma.integration_identities.update({
+  const existing = (identity.provisioning_providers_status || {}) as Record<string, unknown>;
+
+  // Use updateMany so a race where the row is deleted between the
+  // findUnique above and the update below resolves to a 0-row noop instead
+  // of P2025. Cheap belt-and-suspenders for the cleanup race.
+  await prisma.integration_identities.updateMany({
     where: { id: identityId },
     data: {
       provisioning_providers_status: {

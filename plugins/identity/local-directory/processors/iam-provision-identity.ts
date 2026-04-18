@@ -52,7 +52,7 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
 
   // SHARED_CREDENTIAL doesn't need a Keycloak user account
   if (identityType === 'SHARED_CREDENTIAL') {
-    await prisma.integration_identities.update({
+    await prisma.integration_identities.updateMany({
       where: { id: identityId },
       data: {
         provisioning_providers_status: {
@@ -92,7 +92,7 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
       enabled: true,
     });
 
-    await prisma.integration_identities.update({
+    await prisma.integration_identities.updateMany({
       where: { id: identityId },
       data: {
         keycloak_user_id: keycloakUser.id,
@@ -115,7 +115,7 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
       { jobId: job.id, tenantId, identityId, keycloakUserId: keycloakUser.id },
     );
   } catch (err) {
-    await prisma.integration_identities.update({
+    await prisma.integration_identities.updateMany({
       where: { id: identityId },
       data: {
         provisioning_status: 'ERROR',
