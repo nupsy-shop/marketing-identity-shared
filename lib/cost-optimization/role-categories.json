@@ -1,0 +1,4 @@
+{
+  "$schema": "Static role-category lookup for the cost-optimization scanner (issue #58).",
+  "$comment": "Keyed by plugin pluginKey. Values: { roleSlug: { category: 'admin'|'editor'|'read_only'|'uncategorized', readonly?: boolean } }. Platforms without an entry surface as 'uncategorized' (scanner never flags them as duplicate/over-provisioned). Extend this file as plugin manifests add roleCategories; the shared scanner and both hosts consume the SAME JSON so the port stays web-agnostic."
+}
