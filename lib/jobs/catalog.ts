@@ -83,6 +83,26 @@ export const JOB_CATALOG = {
   // provision_team → notify. Fans out to bulk_provision per team member.
   apply_onboarding_kit_for_client: { queue: QUEUE_NAMES.AUTOMATION },
 
+  // ─── Cron fan-out per-agency workers (Heroku Scheduler retirement) ──
+  // issue #49 — hourly pre-expiry notices for time-bound access.
+  pre_expiry_notify_for_agency:         { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #51 — daily automated credential rotation.
+  rotate_credentials_for_agency:        { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #54 — every-10-min identity-source health probes.
+  check_connector_health_for_agency:    { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #55 — daily contractor contract-expiration notices.
+  notify_contract_expirations_for_agency: { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #56 — every-10-min access-window boundary events.
+  notify_window_events_for_agency:      { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #57 — quarterly client-branded trust reports (gated to 1st of quarter).
+  generate_trust_reports_for_agency:    { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #58 — nightly cost-optimization findings refresh.
+  refresh_cost_optimization_for_agency: { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #59 — hourly access-analytics snapshot warmer.
+  refresh_access_analytics_for_agency:  { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #63 — monthly partner-hub access review digest.
+  partner_access_review_for_agency:     { queue: QUEUE_NAMES.AUTOMATION },
+
   // ─── Directory Sync (tenant-scoped) ─────────────────────────────────
   entra_sync_directory: { queue: QUEUE_NAMES.DIRECTORY_SYNC },
   gws_sync_directory:   { queue: QUEUE_NAMES.DIRECTORY_SYNC },
@@ -127,6 +147,19 @@ export const JOB_CATALOG = {
   // issue #62 — fan-out dispatcher. Routes an onboarding-kit apply
   // to the per-client automation worker.
   dispatch_apply_onboarding_kit:  { queue: QUEUE_NAMES.SYSTEM },
+
+  // ─── Cron fan-out dispatchers (Heroku Scheduler retirement) ─────────
+  // Each fans out one tenant-scoped child per active agency. Cron
+  // patterns live in src/index.ts registerDispatchers().
+  dispatch_pre_expiry_notifier:          { queue: QUEUE_NAMES.SYSTEM }, // hourly #49
+  dispatch_rotate_credentials:           { queue: QUEUE_NAMES.SYSTEM }, // daily 02:00 #51
+  dispatch_check_connector_health:       { queue: QUEUE_NAMES.SYSTEM }, // */10 #54
+  dispatch_notify_contract_expirations:  { queue: QUEUE_NAMES.SYSTEM }, // daily 07:00 #55
+  dispatch_notify_window_events:         { queue: QUEUE_NAMES.SYSTEM }, // */10 #56
+  dispatch_generate_trust_reports:       { queue: QUEUE_NAMES.SYSTEM }, // daily 06:00, gated to 1st of quarter #57
+  dispatch_refresh_cost_optimization:    { queue: QUEUE_NAMES.SYSTEM }, // daily 03:00 #58
+  dispatch_refresh_access_analytics:     { queue: QUEUE_NAMES.SYSTEM }, // hourly #59
+  dispatch_partner_access_review:        { queue: QUEUE_NAMES.SYSTEM }, // daily 07:00, gated to 1st of month #63
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
