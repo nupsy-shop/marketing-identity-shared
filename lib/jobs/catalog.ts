@@ -107,6 +107,7 @@ export const JOB_CATALOG = {
   dispatch_discover_assets:   { queue: QUEUE_NAMES.SYSTEM },
   dispatch_sync_directories:  { queue: QUEUE_NAMES.SYSTEM },
   iam_provision_realm:        { queue: QUEUE_NAMES.SYSTEM },
+  iam_upsert_realm_idp:       { queue: QUEUE_NAMES.SYSTEM },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
