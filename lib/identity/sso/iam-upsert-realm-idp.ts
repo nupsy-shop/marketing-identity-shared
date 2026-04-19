@@ -29,7 +29,7 @@
  * shared/lib/runtime.ts so the web app and worker can both dispatch it.
  */
 
-import { getRuntime } from '../../runtime';
+import { getRuntime } from '../../runtime.js';
 import {
   listRealmIdentityProviders,
   getRealmIdentityProvider,
@@ -41,7 +41,7 @@ import {
   isKeycloakAdminConfigured,
   type RealmIdentityProvider,
   type IdentityProviderMapper,
-} from '../../keycloakAdmin';
+} from '../../keycloakAdmin.js';
 
 export type DesiredProvider = 'okta' | 'azure_ad' | 'google' | 'oidc' | 'none';
 
@@ -158,7 +158,7 @@ function buildIdpConfig(params: {
 async function upsertEmailMapper(realm: string, alias: string): Promise<void> {
   const existing = await listIdentityProviderMappers(realm, alias).catch(() => []);
   const name = 'email-to-email';
-  if (existing.some((m) => m.name === name)) return;
+  if (existing.some((m: IdentityProviderMapper) => m.name === name)) return;
   const mapper: IdentityProviderMapper = {
     name,
     identityProviderAlias: alias,
