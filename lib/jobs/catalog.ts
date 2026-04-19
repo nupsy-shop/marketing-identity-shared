@@ -70,6 +70,10 @@ export const JOB_CATALOG = {
   discover_assets:            { queue: QUEUE_NAMES.AUTOMATION },
   jml_detect_lifecycle:       { queue: QUEUE_NAMES.AUTOMATION },
   jml_process_lifecycle:      { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #62 — client onboarding kit per-client worker.
+  // Step machine: attach_platforms → install_templates → create_team →
+  // provision_team → notify. Fans out to bulk_provision per team member.
+  apply_onboarding_kit_for_client: { queue: QUEUE_NAMES.AUTOMATION },
 
   // ─── Directory Sync (tenant-scoped) ─────────────────────────────────
   entra_sync_directory: { queue: QUEUE_NAMES.DIRECTORY_SYNC },
@@ -108,6 +112,9 @@ export const JOB_CATALOG = {
   dispatch_sync_directories:  { queue: QUEUE_NAMES.SYSTEM },
   iam_provision_realm:        { queue: QUEUE_NAMES.SYSTEM },
   iam_upsert_realm_idp:       { queue: QUEUE_NAMES.SYSTEM },
+  // issue #62 — fan-out dispatcher. Routes an onboarding-kit apply
+  // to the per-client automation worker.
+  dispatch_apply_onboarding_kit: { queue: QUEUE_NAMES.SYSTEM },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
