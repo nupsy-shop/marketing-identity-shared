@@ -6,4 +6,4 @@
  * enqueues the job via `lib/jobs/enqueue.ts`.
  */
 
-export { default as iamUpsertRealmIdp } from './iam-upsert-realm-idp';
+export { default as iamUpsertRealmIdp } from './iam-upsert-realm-idp.js';
