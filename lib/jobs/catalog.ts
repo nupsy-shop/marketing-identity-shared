@@ -70,6 +70,7 @@ export const JOB_CATALOG = {
   discover_assets:            { queue: QUEUE_NAMES.AUTOMATION },
   jml_detect_lifecycle:       { queue: QUEUE_NAMES.AUTOMATION },
   jml_process_lifecycle:      { queue: QUEUE_NAMES.AUTOMATION },
+  autoremediation_evaluate:   { queue: QUEUE_NAMES.AUTOMATION },
 
   // ─── Directory Sync (tenant-scoped) ─────────────────────────────────
   entra_sync_directory: { queue: QUEUE_NAMES.DIRECTORY_SYNC },
@@ -105,8 +106,9 @@ export const JOB_CATALOG = {
   dispatch_detect_drift:      { queue: QUEUE_NAMES.SYSTEM },
   dispatch_enforce_retention: { queue: QUEUE_NAMES.SYSTEM },
   dispatch_discover_assets:   { queue: QUEUE_NAMES.SYSTEM },
-  dispatch_sync_directories:  { queue: QUEUE_NAMES.SYSTEM },
-  iam_provision_realm:        { queue: QUEUE_NAMES.SYSTEM },
+  dispatch_sync_directories:      { queue: QUEUE_NAMES.SYSTEM },
+  dispatch_autoremediation_eval:  { queue: QUEUE_NAMES.SYSTEM },
+  iam_provision_realm:            { queue: QUEUE_NAMES.SYSTEM },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
