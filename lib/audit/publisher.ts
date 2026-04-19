@@ -10,6 +10,7 @@
 
 import crypto from 'crypto';
 import { bulkIndex, ping, ensureCurrentIndex } from './client.js';
+import { getLatestEventHashForAgency } from './verify.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -54,8 +55,27 @@ interface InternalAuditEvent {
 }
 
 // ─── Hash Chain ──────────────────────────────────────────────────────────────
+//
+// `_lastHashByAgency` is an in-process cache of the most recent `eventHash`
+// per agency. On process boot it is empty. Without rehydration, the first
+// publish for an agency after restart would write prevHash = 64 zeros — a
+// silent chain break indistinguishable from a legitimate first event.
+//
+// To defend the invariant "chain continuity survives process restarts and
+// multi-process scaling" we:
+//   1. Rehydrate from ES on the first publish per agency per process
+//      (see `ensureAgencyHashHydrated`).
+//   2. Serialize publishes per agency through a per-agency promise queue
+//      (see `_agencyQueues`). Two concurrent publishes for the same agency
+//      never race on read → compute → write of the hash. Across processes
+//      this is a best-effort mitigation: the invariant is written-about in
+//      the feature README (Gap #3) and cross-process serialization requires
+//      a dedicated publisher worker, which is out-of-scope here.
 
+const GENESIS_PREV_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 const _lastHashByAgency = new Map<string, string>();
+const _hydratedAgencies = new Set<string>();
+const _agencyQueues = new Map<string, Promise<unknown>>();
 
 function computeEventHash(event: InternalAuditEvent): string {
   const payload = JSON.stringify({
@@ -71,8 +91,48 @@ function computeEventHash(event: InternalAuditEvent): string {
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
+/**
+ * On first publish per agency per process, read the most recent event from ES
+ * and prime `_lastHashByAgency`. Null ES response means "no prior events" →
+ * we stay on GENESIS. ES errors are swallowed (best-effort) — the next publish
+ * will try again; the chain continuity invariant is documented as best-effort.
+ */
+async function ensureAgencyHashHydrated(agencyId: string): Promise<void> {
+  if (!agencyId || _hydratedAgencies.has(agencyId)) return;
+  try {
+    const latest = await getLatestEventHashForAgency(agencyId);
+    if (latest) {
+      _lastHashByAgency.set(agencyId, latest);
+    }
+  } catch (err: unknown) {
+    console.error('[Audit] Hash rehydrate failed (will retry next publish):', (err as Error).message);
+    return; // do NOT mark hydrated; retry on next publish
+  }
+  _hydratedAgencies.add(agencyId);
+}
+
 function getPrevHash(agencyId: string): string {
-  return _lastHashByAgency.get(agencyId) || '0000000000000000000000000000000000000000000000000000000000000000';
+  return _lastHashByAgency.get(agencyId) || GENESIS_PREV_HASH;
+}
+
+/**
+ * Serialize `fn()` per-agency. Two concurrent callers for the same agency
+ * run sequentially; different agencies run in parallel. Failures in `fn`
+ * do not poison the queue — the chain is released after each callback.
+ */
+function withAgencyLock<T>(agencyId: string, fn: () => Promise<T>): Promise<T> {
+  const prior = _agencyQueues.get(agencyId) || Promise.resolve();
+  const next = prior.then(fn, fn);
+  // Keep the queue tail bounded by always chaining from a settled promise.
+  _agencyQueues.set(agencyId, next.catch(() => undefined));
+  return next;
+}
+
+// Exported for testing — allows resetting in-memory state between cases.
+export function __resetHashChainStateForTest(): void {
+  _lastHashByAgency.clear();
+  _hydratedAgencies.clear();
+  _agencyQueues.clear();
 }
 
 // ─── Buffer ──────────────────────────────────────────────────────────────────
@@ -190,11 +250,22 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
     prevHash: '',
   };
 
-  // Compute hash chain
+  // Compute hash chain — serialized per-agency so concurrent publishes in a
+  // single process cannot both read the same `prevHash` and fork the chain.
   const agencyId = event.agency.id;
-  event.prevHash = getPrevHash(agencyId || '');
-  event.eventHash = computeEventHash(event);
-  if (agencyId) _lastHashByAgency.set(agencyId, event.eventHash);
+  if (agencyId) {
+    await withAgencyLock(agencyId, async () => {
+      await ensureAgencyHashHydrated(agencyId);
+      event.prevHash = getPrevHash(agencyId);
+      event.eventHash = computeEventHash(event);
+      _lastHashByAgency.set(agencyId, event.eventHash);
+    });
+  } else {
+    // No agency id → unchained event (system-level). Still hash the body so
+    // downstream consumers see a non-empty eventHash.
+    event.prevHash = GENESIS_PREV_HASH;
+    event.eventHash = computeEventHash(event);
+  }
 
   // Add to buffer
   _buffer.push(event);
