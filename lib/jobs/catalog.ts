@@ -71,6 +71,10 @@ export const JOB_CATALOG = {
   jml_detect_lifecycle:       { queue: QUEUE_NAMES.AUTOMATION },
   jml_process_lifecycle:      { queue: QUEUE_NAMES.AUTOMATION },
   autoremediation_evaluate:   { queue: QUEUE_NAMES.AUTOMATION },
+  // HRIS webhook ingest: tenant-scoped. Per-agency partitioning is applied
+  // by giving Bull a jobId of `hris-<agency>-<provider>-<ts>` so one
+  // misbehaving agency's backlog cannot block another agency's events.
+  jml_process_hris_events:    { queue: QUEUE_NAMES.AUTOMATION },
 
   // ─── Directory Sync (tenant-scoped) ─────────────────────────────────
   entra_sync_directory: { queue: QUEUE_NAMES.DIRECTORY_SYNC },
