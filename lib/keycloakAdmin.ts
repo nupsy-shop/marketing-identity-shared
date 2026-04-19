@@ -294,6 +294,102 @@ export async function sendKeycloakActionsEmail(
   }
 }
 
+// ─── Identity Provider (federation broker) operations ────────────────────
+//
+// Each agency realm may have 0..1 federated upstream OIDC IdP. The
+// reconciliation job (iam_upsert_realm_idp) uses these helpers to
+// converge the realm's /identity-provider/instances collection on the
+// desired state derived from agency_settings.
+
+export interface RealmIdentityProvider {
+  alias: string;
+  providerId: string;            // 'oidc' | 'keycloak-oidc' | vendor-specific
+  displayName?: string;
+  enabled?: boolean;
+  config?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+export async function listRealmIdentityProviders(realm: string): Promise<RealmIdentityProvider[]> {
+  const res = await adminFetch(realm, '/identity-provider/instances');
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to list identity providers (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function getRealmIdentityProvider(realm: string, alias: string): Promise<RealmIdentityProvider | null> {
+  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to get identity provider ${alias} (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function createRealmIdentityProvider(realm: string, idp: RealmIdentityProvider): Promise<void> {
+  const res = await adminFetch(realm, '/identity-provider/instances', {
+    method: 'POST',
+    body: JSON.stringify(idp),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to create identity provider (${res.status}): ${text}`);
+  }
+}
+
+export async function updateRealmIdentityProvider(realm: string, alias: string, idp: RealmIdentityProvider): Promise<void> {
+  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`, {
+    method: 'PUT',
+    body: JSON.stringify(idp),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to update identity provider ${alias} (${res.status}): ${text}`);
+  }
+}
+
+export async function deleteRealmIdentityProvider(realm: string, alias: string): Promise<void> {
+  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`, {
+    method: 'DELETE',
+  });
+  // 404 — already gone, treat as success (idempotent)
+  if (res.status === 404) return;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to delete identity provider ${alias} (${res.status}): ${text}`);
+  }
+}
+
+export interface IdentityProviderMapper {
+  name: string;
+  identityProviderAlias: string;
+  identityProviderMapper: string;
+  config: Record<string, string>;
+}
+
+export async function listIdentityProviderMappers(realm: string, alias: string): Promise<IdentityProviderMapper[]> {
+  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}/mappers`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to list IdP mappers (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function createIdentityProviderMapper(realm: string, alias: string, mapper: IdentityProviderMapper): Promise<void> {
+  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}/mappers`, {
+    method: 'POST',
+    body: JSON.stringify(mapper),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to create IdP mapper (${res.status}): ${text}`);
+  }
+}
+
 // ─── Bulk provisioning ─────────────────────────────────────────────────────
 
 export async function bulkProvisionUsers(

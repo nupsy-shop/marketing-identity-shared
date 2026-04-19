@@ -75,6 +75,9 @@ export const JOB_CATALOG = {
   // by giving Bull a jobId of `hris-<agency>-<provider>-<ts>` so one
   // misbehaving agency's backlog cannot block another agency's events.
   jml_process_hris_events:    { queue: QUEUE_NAMES.AUTOMATION },
+  // Campaign-scoped access (issue #60) — per-agency worker ends all
+  // campaign-tagged grants via the existing JML leaver.
+  end_campaign_for_agency:    { queue: QUEUE_NAMES.AUTOMATION },
 
   // ─── Directory Sync (tenant-scoped) ─────────────────────────────────
   entra_sync_directory: { queue: QUEUE_NAMES.DIRECTORY_SYNC },
@@ -112,7 +115,11 @@ export const JOB_CATALOG = {
   dispatch_discover_assets:   { queue: QUEUE_NAMES.SYSTEM },
   dispatch_sync_directories:      { queue: QUEUE_NAMES.SYSTEM },
   dispatch_autoremediation_eval:  { queue: QUEUE_NAMES.SYSTEM },
+  // Campaign-scoped access (issue #60) — system dispatcher that fans out
+  // one end_campaign_for_agency job per due campaign.
+  dispatch_end_campaign:          { queue: QUEUE_NAMES.SYSTEM },
   iam_provision_realm:            { queue: QUEUE_NAMES.SYSTEM },
+  iam_upsert_realm_idp:           { queue: QUEUE_NAMES.SYSTEM },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
