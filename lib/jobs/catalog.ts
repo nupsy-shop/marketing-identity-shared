@@ -121,6 +121,11 @@ export const JOB_CATALOG = {
   entra_add_group_member:    { queue: QUEUE_NAMES.PROVISIONING },
   entra_remove_group_member: { queue: QUEUE_NAMES.PROVISIONING },
   saml_client_configure:     { queue: QUEUE_NAMES.PROVISIONING },
+  // issue #51 — per-identity credential rotation. Enqueued by the
+  // `rotate_credentials_for_agency` scan, one job per identity due.
+  // Web-side handler (KMS/vault + rotation providers) is a follow-up;
+  // bull-side registers a logging stub that completes until wired.
+  rotate_credential_for_identity: { queue: QUEUE_NAMES.PROVISIONING },
 
   // ─── Notifications (tenant-scoped) ──────────────────────────────────
   webhook_deliver: { queue: QUEUE_NAMES.NOTIFICATIONS },
