@@ -64,12 +64,25 @@ interface JobDefinition {
  */
 export const JOB_CATALOG = {
   // ─── Automation (tenant-scoped) ─────────────────────────────────────
+  // Audit-poll jobs — one per plugin that declares an auditAdapter. Each
+  // is owned by its plugin (processor + manifest.auditAdapter.jobName).
+  // See docs/superpowers/specs/2026-04-19-plugin-owned-platform-audit-polling-design.md.
   entra_poll_audit:           { queue: QUEUE_NAMES.AUTOMATION },
   gws_poll_audit:             { queue: QUEUE_NAMES.AUTOMATION },
   // issue #88 — Local Directory (Keycloak-backed) per-agency audit poll.
   // Always enqueued by dispatch_poll_audits — no "enabled" toggle; Local
   // Directory audit ingestion is locked on.
   local_dir_poll_audit:       { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #101 — per-platform audit polls (plugin-owned processors).
+  meta_poll_audit:            { queue: QUEUE_NAMES.AUTOMATION },
+  google_ads_poll_audit:      { queue: QUEUE_NAMES.AUTOMATION },
+  ga4_poll_audit:             { queue: QUEUE_NAMES.AUTOMATION },
+  gtm_poll_audit:             { queue: QUEUE_NAMES.AUTOMATION },
+  hubspot_poll_audit:         { queue: QUEUE_NAMES.AUTOMATION },
+  salesforce_poll_audit:      { queue: QUEUE_NAMES.AUTOMATION },
+  okta_poll_audit:            { queue: QUEUE_NAMES.AUTOMATION },
+  onelogin_poll_audit:        { queue: QUEUE_NAMES.AUTOMATION },
+  jumpcloud_poll_audit:       { queue: QUEUE_NAMES.AUTOMATION },
   detect_drift:               { queue: QUEUE_NAMES.AUTOMATION },
   enforce_retention:          { queue: QUEUE_NAMES.AUTOMATION },
   discover_assets:            { queue: QUEUE_NAMES.AUTOMATION },
