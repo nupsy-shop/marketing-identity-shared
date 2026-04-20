@@ -11,7 +11,15 @@
  * hand-roll recurrence arithmetic.
  */
 
-import { RRule, rrulestr } from 'rrule';
+// `rrule` is a CommonJS package with no ESM named exports; under Node's
+// ESM resolver the named-export form fails at runtime with
+// "Named export 'RRule' not found". Import the default and destructure
+// for runtime values, and re-import the class as a type-only name so
+// the `RRule` identifier works at both value and type positions.
+import rrulePkg from 'rrule';
+import type { RRule as RRuleInstance } from 'rrule';
+const { RRule, rrulestr } = rrulePkg;
+type RRule = RRuleInstance;
 
 export type DayName = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat';
 
