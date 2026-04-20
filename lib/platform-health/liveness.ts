@@ -19,9 +19,11 @@
  */
 
 import type { LivenessResult } from './types.js';
+import { getRuntime } from '../runtime.js';
 
 interface SourceForLiveness {
   id: string;
+  agencyId: string;
   pluginKey: string;
   connectionState: string | null;
   connectionConfig: Record<string, unknown> | null;
@@ -127,6 +129,84 @@ async function checkGoogleWorkspace(source: SourceForLiveness): Promise<Liveness
     };
   }
 
+  // Resolve an access token through the host-registered callback.
+  // Shared code cannot import the web app's token helper directly;
+  // the resolver runs inside the agency's tenant context.
+  const { resolveGwsAccessToken } = getRuntime();
+  if (!resolveGwsAccessToken) {
+    // Host did not register a resolver (e.g. worker context). Fall back to
+    // the public-endpoint heartbeat so the check still runs — this matches
+    // pre-fix behavior and never flips 'auth'.
+    return checkGoogleWorkspaceHeartbeat();
+  }
+
+  let accessToken: string | null = null;
+  try {
+    accessToken = await resolveGwsAccessToken(source.agencyId);
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      errorCategory: 'unknown',
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  if (!accessToken) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      errorCategory: 'auth',
+      errorMessage: 'refresh_token_invalid',
+    };
+  }
+
+  const start = Date.now();
+  try {
+    const url =
+      `https://admin.googleapis.com/admin/directory/v1/users` +
+      `?customer=${encodeURIComponent(customerId)}` +
+      `&maxResults=1&fields=kind`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const latencyMs = Date.now() - start;
+
+    if (res.ok) {
+      await res.json().catch(() => ({}));
+      return { ok: true, latencyMs };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return {
+        ok: false,
+        latencyMs,
+        errorCategory: 'auth',
+        errorMessage: `HTTP ${res.status}`,
+      };
+    }
+    return {
+      ok: false,
+      latencyMs,
+      errorCategory: res.status >= 500 ? 'server' : 'unknown',
+      errorMessage: `HTTP ${res.status}`,
+    };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      errorCategory: 'network',
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// Preserved as a fallback for hosts that haven't registered
+// resolveGwsAccessToken (notably the worker). Not a real liveness signal,
+// but strictly better than throwing.
+async function checkGoogleWorkspaceHeartbeat(): Promise<LivenessResult> {
   const start = Date.now();
   try {
     const res = await fetch('https://accounts.google.com/.well-known/openid-configuration', {
