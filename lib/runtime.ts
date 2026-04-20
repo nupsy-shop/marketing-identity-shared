@@ -33,6 +33,20 @@ export interface RuntimeServices {
    * @returns Job ID or null if unavailable
    */
   enqueueJob?: (jobType: string, data: Record<string, unknown>) => Promise<string | null>;
+  /**
+   * Optional Google Workspace access-token resolver, registered by the host.
+   * Used by the platform-health liveness probe to authenticate a minimal
+   * `admin.directory.users.list` call. Must execute inside the agency's
+   * tenant context (RLS). Returns null when no active token is available
+   * or the refresh flow failed — the liveness check treats null as an
+   * auth error and the checker flips the source to 'needs_reauth'.
+   *
+   * Contract: read-only. Resolver must not rotate or mutate credentials.
+   *
+   * @param agencyId - Agency whose GWS token to resolve
+   * @returns Access token string, or null if unavailable
+   */
+  resolveGwsAccessToken?: (agencyId: string) => Promise<string | null>;
 }
 
 // Use globalThis to ensure a single instance across compiled modules.
