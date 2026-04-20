@@ -26,6 +26,8 @@ import type {
   RemediationActionHandler,
 } from './common/remediation-contract.js';
 import localDirectoryRemediations from './local-directory/remediations/index.js';
+import googleWorkspaceRemediations from './google-workspace/remediations/index.js';
+import entraIdRemediations from './entra-id/remediations/index.js';
 
 /** Custom error thrown on any registry validation failure. */
 export class PluginRemediationRegistrationError extends Error {
@@ -43,6 +45,8 @@ const NAMESPACED_RE = /^[a-z][a-z0-9-]*:[a-z][a-z0-9_]*$/;
  */
 const REGISTERED_PLUGINS: PluginRemediationModule[] = [
   localDirectoryRemediations,
+  googleWorkspaceRemediations,
+  entraIdRemediations,
 ];
 
 interface RegistryState {
