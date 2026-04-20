@@ -34,7 +34,7 @@
 
 import type Bull from 'bull';
 import { getRuntime } from '../runtime.js';
-import { publishAuditEvent, flushAll } from './publisher.js';
+import { publishAuditEvent, flushAll, type AuditEventPayload } from './publisher.js';
 
 export interface AuditAdapterContext {
   agencyId: string;
@@ -50,11 +50,22 @@ export interface AuditAdapterResult {
   errors?: string[];
 }
 
-export type PollAuditEventsFn = (
-  accessToken: string,
-  since: Date,
-  context: AuditAdapterContext,
-) => Promise<AuditAdapterResult>;
+/**
+ * The adapter function each plugin's `audit-adapter.ts` exports.
+ *
+ * Typed against `any` (not strict AuditAdapterContext/AuditAdapterResult)
+ * at the function-signature boundary because every plugin redeclares
+ * those shapes locally with slightly different widths — cursor:
+ * Record<string,string> vs Record<string,unknown>, resource.id: string
+ * vs string|null, plus plugin-specific extras (oktaDomain,
+ * adAccountIds, etc.). Nominal typing via `any` lets each plugin's
+ * typed implementation assign cleanly without forcing every plugin to
+ * import a canonical set of types. The factory narrows results to
+ * AuditAdapterResult internally (see the call site below) before
+ * reading events/cursor/errors.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type PollAuditEventsFn = (accessToken: string, since: Date, context: any) => Promise<any>;
 
 export interface OAuthTokenRow {
   id: string;
@@ -277,13 +288,19 @@ export function createPlatformAuditProcessor(
       ...extras,
     };
 
-    // 7. Invoke adapter.
-    const result = await pollAuditEvents(accessToken, since, context);
-    const events = result.events || [];
+    // 7. Invoke adapter. The adapter is declared with `any` I/O to allow
+    //    each plugin's locally-typed implementation to plug in; cast the
+    //    result to the factory's canonical shape at this boundary so the
+    //    rest of this function can reason about events/cursor/errors
+    //    concretely.
+    const result = (await pollAuditEvents(accessToken, since, context)) as AuditAdapterResult;
+    const events = result?.events ?? [];
 
-    // 8. Publish events.
+    // 8. Publish events. AuditEventPayload declares an index signature
+    //    for custom fields that plugin AuditEvent shapes omit; cast at
+    //    this boundary.
     for (const event of events) {
-      await publishAuditEvent(event);
+      await publishAuditEvent(event as unknown as AuditEventPayload);
     }
     await flushAll();
 
