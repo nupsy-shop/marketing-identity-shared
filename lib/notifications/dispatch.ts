@@ -76,8 +76,14 @@ export async function dispatchNotification(
     return { matched: 0, dispatched: 0 };
   }
 
+  // In-app channels are implicitly subscribed to every event type. The
+  // in-app plugin is auto-provisioned per agency and cannot be disabled or
+  // deleted (see app/api/auth/create-agency/route.ts and PUT/DELETE guards
+  // in app/api/settings/notifications/[id]/route.ts), so we bypass the
+  // subscription join for it. This keeps coverage complete as new event
+  // types are added — no backfill migration needed.
   const matched = channels.filter((c) =>
-    matchesSubscription(c.enabled_events, eventType),
+    isInAppChannel(c.type) || matchesSubscription(c.enabled_events, eventType),
   );
   if (matched.length === 0) return { matched: 0, dispatched: 0 };
 
@@ -187,6 +193,10 @@ export async function dispatchNotification(
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+function isInAppChannel(type: string | undefined | null): boolean {
+  return type === 'in-app' || type === 'in_app';
+}
 
 function matchesSubscription(patterns: string[], eventType: string): boolean {
   if (!patterns || patterns.length === 0) return false;
