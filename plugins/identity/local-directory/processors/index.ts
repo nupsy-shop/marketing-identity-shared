@@ -5,6 +5,7 @@ export default {
   iam_disable_app_user: () => import('./iam-disable-app-user.js'),
   iam_enable_app_user: () => import('./iam-enable-app-user.js'),
   iam_deprovision_app_user: () => import('./iam-deprovision-app-user.js'),
+  local_dir_poll_audit: () => import('./local-dir-poll-audit.js'),
 };
 
 export const concurrency = {
@@ -12,4 +13,5 @@ export const concurrency = {
   iam_disable_app_user: 2,
   iam_enable_app_user: 2,
   iam_deprovision_app_user: 2,
+  local_dir_poll_audit: 1,
 };
