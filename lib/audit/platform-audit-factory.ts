@@ -133,20 +133,25 @@ export function createPlatformAuditProcessor(
     const { prisma, logger } = getRuntime();
 
     // 1. Eligibility: platform row for this tenant, ingestion on, scope OK.
+    //    Prisma Client field names are snake_case in the worker schema
+    //    (@map preserves the camelCase DB columns). The runtime prisma
+    //    handle is typed as `any`, so typos here slip past tsc and only
+    //    surface as runtime PrismaClientValidationError — that's how the
+    //    ga4/meta/salesforce polls were circuit-tripping in production.
     const ap = await prisma.agency_platforms.findFirst({
       where: {
         id: platformId,
         agency_id: tenantId,
-        auditIngestionEnabled: true,
-        auditScopeAuthorized: true,
-        deletedAt: null,
-        isEnabled: true,
+        audit_ingestion_enabled: true,
+        audit_scope_authorized: true,
+        deleted_at: null,
+        is_enabled: true,
       },
       select: {
         id: true,
         agency_id: true,
-        auditPollCursor: true,
-        lastAuditPollAt: true,
+        audit_poll_cursor: true,
+        last_audit_poll_at: true,
         connection_config: true,
       },
     });
@@ -190,7 +195,7 @@ export function createPlatformAuditProcessor(
       // the scope unauthorized so the UI prompts a reconnect.
       await prisma.agency_platforms.update({
         where: { id: platformId },
-        data: { auditScopeAuthorized: false, updatedAt: new Date() },
+        data: { audit_scope_authorized: false, updated_at: new Date() },
       });
       await publishAuditEvent({
         eventType: 'audit.platform.token_expired',
@@ -219,7 +224,7 @@ export function createPlatformAuditProcessor(
         // emit token_expired.
         await prisma.agency_platforms.update({
           where: { id: platformId },
-          data: { auditScopeAuthorized: false, updatedAt: new Date() },
+          data: { audit_scope_authorized: false, updated_at: new Date() },
         });
         await publishAuditEvent({
           eventType: 'audit.platform.token_expired',
@@ -244,7 +249,7 @@ export function createPlatformAuditProcessor(
       if (!refreshed) {
         await prisma.agency_platforms.update({
           where: { id: platformId },
-          data: { auditScopeAuthorized: false, updatedAt: new Date() },
+          data: { audit_scope_authorized: false, updated_at: new Date() },
         });
         await publishAuditEvent({
           eventType: 'audit.platform.token_expired',
@@ -267,8 +272,8 @@ export function createPlatformAuditProcessor(
     }
 
     // 5. Poll window.
-    const since = ap.lastAuditPollAt
-      ? new Date(ap.lastAuditPollAt)
+    const since = ap.last_audit_poll_at
+      ? new Date(ap.last_audit_poll_at)
       : new Date(Date.now() - 24 * 60 * 60 * 1000);
 
     // 6. Plugin-specific adapter extras.
@@ -284,7 +289,7 @@ export function createPlatformAuditProcessor(
       agencyId: tenantId,
       agencySlug,
       platformId: ap.id,
-      cursor: (ap.auditPollCursor as Record<string, unknown> | null) ?? {},
+      cursor: (ap.audit_poll_cursor as Record<string, unknown> | null) ?? {},
       ...extras,
     };
 
@@ -308,9 +313,9 @@ export function createPlatformAuditProcessor(
     await prisma.agency_platforms.update({
       where: { id: ap.id },
       data: {
-        auditPollCursor: (result.cursor ?? {}) as object,
-        lastAuditPollAt: new Date(),
-        updatedAt: new Date(),
+        audit_poll_cursor: (result.cursor ?? {}) as object,
+        last_audit_poll_at: new Date(),
+        updated_at: new Date(),
       },
     });
 
