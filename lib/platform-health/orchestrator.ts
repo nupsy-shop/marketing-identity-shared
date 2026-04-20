@@ -69,6 +69,7 @@ export async function runHealthChecksForAgency(
     try {
       const liveness = await runLivenessCheck({
         id: row.id,
+        agencyId,
         pluginKey: row.plugin_key,
         connectionState: row.connection_state,
         connectionConfig: row.connection_config as Record<string, unknown> | null,
