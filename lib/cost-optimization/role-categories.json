@@ -1,4 +1,38 @@
 {
   "$schema": "Static role-category lookup for the cost-optimization scanner (issue #58).",
-  "$comment": "Keyed by plugin pluginKey. Values: { roleSlug: { category: 'admin'|'editor'|'read_only'|'uncategorized', readonly?: boolean } }. Platforms without an entry surface as 'uncategorized' (scanner never flags them as duplicate/over-provisioned). Extend this file as plugin manifests add roleCategories; the shared scanner and both hosts consume the SAME JSON so the port stays web-agnostic."
+  "$comment": "Keyed by plugin pluginKey. Values: { roleSlug: { category: 'admin'|'editor'|'read_only'|'uncategorized', readonly?: boolean } }. Platforms without an entry surface as 'uncategorized' (scanner never flags them as duplicate/over-provisioned). Extend this file as plugin manifests add roleCategories; the shared scanner and both hosts consume the SAME JSON so the port stays web-agnostic.",
+  "google-ads": {
+    "admin":       { "category": "admin" },
+    "standard":    { "category": "editor" },
+    "read-only":   { "category": "read_only", "readonly": true },
+    "billing":     { "category": "admin" },
+    "email-only":  { "category": "read_only", "readonly": true }
+  },
+  "meta": {
+    "admin":      { "category": "admin" },
+    "analyst":    { "category": "read_only", "readonly": true },
+    "advertiser": { "category": "editor" }
+  },
+  "shopify": {
+    "full-access":   { "category": "admin" },
+    "store-owner":   { "category": "admin" },
+    "limited-staff": { "category": "editor" },
+    "read-write":    { "category": "editor" },
+    "reports-only":  { "category": "read_only", "readonly": true },
+    "read-only":     { "category": "read_only", "readonly": true }
+  },
+  "hubspot": {
+    "super-admin":   { "category": "admin" },
+    "admin":         { "category": "admin" },
+    "partner-admin": { "category": "admin" },
+    "standard":      { "category": "editor" },
+    "read-write":    { "category": "editor" },
+    "read-only":     { "category": "read_only", "readonly": true }
+  },
+  "salesforce": {
+    "system-administrator": { "category": "admin" },
+    "standard-user":        { "category": "editor" },
+    "marketing-user":       { "category": "editor" },
+    "read-only":            { "category": "read_only", "readonly": true }
+  }
 }
