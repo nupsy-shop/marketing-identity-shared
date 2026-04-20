@@ -14,7 +14,7 @@ export default createPlatformAuditProcessor({
   pluginKey: 'okta',
   pollAuditEvents,
   buildAdapterExtras: (ap) => {
-    const cfg = (ap.connection_config ?? {}) as Record<string, unknown>;
+    const cfg = (ap.admin_config_json ?? {}) as Record<string, unknown>;
     const oktaDomain = typeof cfg.oktaDomain === 'string' ? cfg.oktaDomain : undefined;
     return oktaDomain ? { oktaDomain } : {};
   },

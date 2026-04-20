@@ -10,7 +10,7 @@ export default createPlatformAuditProcessor({
   pluginKey: 'onelogin',
   pollAuditEvents,
   buildAdapterExtras: (ap) => {
-    const cfg = (ap.connection_config ?? {}) as Record<string, unknown>;
+    const cfg = (ap.admin_config_json ?? {}) as Record<string, unknown>;
     const subdomain = typeof cfg.oneloginSubdomain === 'string' ? cfg.oneloginSubdomain : undefined;
     return subdomain ? { oneloginSubdomain: subdomain } : {};
   },

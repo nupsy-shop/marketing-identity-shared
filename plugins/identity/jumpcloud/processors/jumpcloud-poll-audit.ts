@@ -10,7 +10,7 @@ export default createPlatformAuditProcessor({
   pluginKey: 'jumpcloud',
   pollAuditEvents,
   buildAdapterExtras: (ap) => {
-    const cfg = (ap.connection_config ?? {}) as Record<string, unknown>;
+    const cfg = (ap.admin_config_json ?? {}) as Record<string, unknown>;
     const orgId = typeof cfg.jumpcloudOrgId === 'string' ? cfg.jumpcloudOrgId : undefined;
     return orgId ? { orgId } : {};
   },

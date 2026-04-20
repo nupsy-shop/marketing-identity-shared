@@ -99,7 +99,7 @@ export interface PlatformAuditProcessorOptions {
   buildAdapterExtras?: (agencyPlatform: {
     id: string;
     agency_id: string;
-    connection_config: unknown;
+    admin_config_json: unknown;
   }) => Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
@@ -152,7 +152,7 @@ export function createPlatformAuditProcessor(
         agency_id: true,
         audit_poll_cursor: true,
         last_audit_poll_at: true,
-        connection_config: true,
+        admin_config_json: true,
       },
     });
 
@@ -276,12 +276,15 @@ export function createPlatformAuditProcessor(
       ? new Date(ap.last_audit_poll_at)
       : new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    // 6. Plugin-specific adapter extras.
+    // 6. Plugin-specific adapter extras. For agency_platforms the
+    //    per-platform admin config lives in admin_config_json (mapped
+    //    to adminConfigJson in DB); this is the agency_platforms
+    //    analogue of identity_sources.connection_config.
     const extras = buildAdapterExtras
       ? await buildAdapterExtras({
           id: ap.id,
           agency_id: ap.agency_id,
-          connection_config: ap.connection_config,
+          admin_config_json: ap.admin_config_json,
         })
       : {};
 
