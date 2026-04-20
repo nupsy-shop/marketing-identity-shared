@@ -11,12 +11,15 @@
  * hand-roll recurrence arithmetic.
  */
 
-// `rrule` is a CommonJS package with no ESM named exports; under Node's
-// ESM resolver the named-export form fails at runtime with
-// "Named export 'RRule' not found". Import the default and destructure
-// for runtime values, and re-import the class as a type-only name so
-// the `RRule` identifier works at both value and type positions.
-import rrulePkg from 'rrule';
+// `rrule` has two incompatible runtime shapes:
+//   • Plain Node ESM (bull worker): named imports fail at runtime with
+//     "Named export 'RRule' not found" because rrule's CJS entry is loaded.
+//   • Next.js webpack production build: a prior default-import fix breaks
+//     here because webpack interops the ESM entry and `rrulePkg.default`
+//     is undefined.
+// Namespace import works in both runtimes — named exports always land on
+// the namespace object regardless of CJS/ESM interop strategy.
+import * as rrulePkg from 'rrule';
 import type { RRule as RRuleInstance } from 'rrule';
 const { RRule, rrulestr } = rrulePkg;
 type RRule = RRuleInstance;
