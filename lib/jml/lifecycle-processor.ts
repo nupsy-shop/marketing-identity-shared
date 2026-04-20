@@ -80,10 +80,21 @@ export interface WriteGuardrails {
 }
 
 export interface ProcessLifecycleParams {
-  sourceId: string;
+  /**
+   * Identity source row id. Required for directory-sourced lifecycle
+   * events. MAY be null for synthetic-origin events like
+   * `pluginKey: 'contractor-expiry'` where the trigger is a contract
+   * end-date, not a directory sync.
+   */
+  sourceId: string | null;
   agencyId: string;
   pluginKey: string;
   events: LifecycleEvents;
+  /**
+   * For the contractor-expiry branch ONLY. Identifies the `users` row
+   * whose access should be revoked. Ignored on directory-sourced paths.
+   */
+  userId?: string;
   policies: JmlPolicies;
   guardrails: WriteGuardrails;
   scope: JmlScope | null;
@@ -208,8 +219,87 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
   skippedByGuardrail: boolean;
   enqueued: number;
 }> {
-  const { sourceId, agencyId, pluginKey, events, policies, guardrails, scope } = params;
-  const { logger } = getRuntime();
+  const { sourceId, agencyId, pluginKey, events, policies, guardrails, scope, userId } = params;
+  const { logger, prisma, enqueueJob } = getRuntime();
+
+  // ─── Contractor-expiry branch ──────────────────────────────────────────
+  // Dedicated path for `pluginKey: 'contractor-expiry'` auto-offboards.
+  // No directory sync, no per-source scope filtering, no policy lookup —
+  // contract ended, revoke every grant the contractor holds.
+  if (pluginKey === 'contractor-expiry') {
+    if (!userId) {
+      logger.warn('[JML] contractor-expiry path requires userId', { agencyId });
+      return { processed: 0, skippedByScope: 0, skippedByGuardrail: false, enqueued: 0 };
+    }
+    // Find all active access items for this user via access_requests.requestedBy.
+    // requestedBy is the users.id (stringified) on rows created from the Users surface.
+    const requests = await prisma.access_requests.findMany({
+      where: { agency_id: agencyId, requestedBy: userId },
+      select: { id: true },
+    });
+    const requestIds = requests.map((r: { id: string }) => r.id);
+    const items = requestIds.length
+      ? await prisma.access_request_items.findMany({
+          where: {
+            agency_id: agencyId,
+            accessRequestId: { in: requestIds },
+            status: { in: ['granted', 'validated'] },
+          },
+          include: { catalog_platforms: { select: { slug: true } } },
+        })
+      : [];
+
+    let enqueued = 0;
+    if (enqueueJob) {
+      for (const it of items) {
+        const platformKey = (it as { catalog_platforms?: { slug?: string | null } | null }).catalog_platforms?.slug ?? null;
+        const principal = events.leavers?.[0] ?? userId;
+        try {
+          const id = await enqueueJob('iam_deprovision_app_user', {
+            tenantId: agencyId,
+            sourceId: null,
+            pluginKey: platformKey ?? 'contractor-expiry',
+            principal,
+            accessItemId: it.id,
+            triggeredBy: 'contract-expired',
+            kind: 'leaver',
+          });
+          if (id) enqueued += 1;
+        } catch (err) {
+          logger.error('[JML] contractor-expiry: deprovision enqueue failed', {
+            agencyId, userId, accessItemId: it.id,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    // Emit a summary audit so the auto-offboard is always observable even
+    // when no grants were found (empty contractor = clean no-op).
+    try {
+      const { publishAuditEvent } = await import('../audit/publisher.js');
+      await publishAuditEvent({
+        eventType: 'directory.user.contract_auto_offboarded',
+        source: 'jml-lifecycle-processor',
+        severity: 'warning',
+        agency: { id: agencyId },
+        actor: { id: 'system', type: 'system' },
+        resource: { type: 'user', id: userId },
+        context: { pluginKey, userId, grantsFound: items.length, grantsRevoked: enqueued },
+      });
+    } catch (err) {
+      logger.warn('[JML] contractor-expiry: audit emit failed (non-fatal)', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    return { processed: items.length, skippedByScope: 0, skippedByGuardrail: false, enqueued };
+  }
+
+  if (!sourceId) {
+    logger.warn('[JML] non-contractor pluginKey requires sourceId', { agencyId, pluginKey });
+    return { processed: 0, skippedByScope: 0, skippedByGuardrail: false, enqueued: 0 };
+  }
 
   let processed = 0;
   let skippedByScope = 0;
@@ -249,7 +339,6 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
   //    plus optional notification jobs per the policy's notify_* flags.
   //    All downstream routing (queue selection, retries, etc.) happens via
   //    the shared catalog once the jobType is determined.
-  const { enqueueJob } = getRuntime();
   if (!enqueueJob) {
     // Host did not wire up an enqueue callback — caller must dispatch the
     // events themselves. Return counts only. This preserves the behavior
