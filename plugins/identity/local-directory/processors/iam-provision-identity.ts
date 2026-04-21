@@ -20,13 +20,19 @@ import { createKeycloakUser, isKeycloakAdminConfigured } from '../../../../lib/k
 import { reconcileProvisioningStatus } from '../../../../lib/provisioningReconciler.js';
 
 interface JobResult {
-  status: 'completed';
+  status: 'completed' | 'skipped';
   jobType: string;
+  reason?: string;
 }
 
 export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResult> {
   const { prisma, logger } = getRuntime();
-  const { tenantId, identityId } = job.data;
+  const { tenantId, identityId, pluginKey, triggeredBy } = job.data as {
+    tenantId: string;
+    identityId: string;
+    pluginKey?: string;
+    triggeredBy?: string;
+  };
 
   if (!isKeycloakAdminConfigured()) {
     logger.warn('Keycloak admin not configured, skipping', { jobId: job.id, tenantId });
@@ -45,6 +51,45 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
   if (!identity) {
     logger.warn('Identity not found — already deleted, skipping', { jobId: job.id, tenantId, identityId });
     return { status: 'completed', jobType: 'iam_provision_identity' };
+  }
+
+  // JML joiner gate. If this job was fanned out by the JML lifecycle pipeline
+  // (triggeredBy='jml_process_lifecycle' + pluginKey set in the payload by
+  // lifecycle-processor's dispatchPrimary), honor the source's per-source
+  // overrides. Checkout-driven synthetic-identity creation does not set these
+  // fields, so the gate is inert for that flow.
+  if (triggeredBy === 'jml_process_lifecycle' && pluginKey) {
+    const source = await prisma.identity_sources.findFirst({
+      where: { agency_id: tenantId, plugin_key: pluginKey },
+      select: { connection_config: true },
+    });
+
+    if (!source) {
+      const reason = `source not found for plugin ${pluginKey}`;
+      logger.info('iam_provision_identity: JML joiner skipped', {
+        jobId: String(job.id), tenantId, identityId, pluginKey, reason,
+      });
+      return { status: 'skipped', jobType: 'iam_provision_identity', reason };
+    }
+
+    const cfg = (source.connection_config ?? {}) as Record<string, unknown>;
+    const syncUsers = cfg.syncUsers !== false;
+    const autoProvision = cfg.autoProvisionUsers !== false;
+
+    if (!syncUsers) {
+      const reason = `syncUsers disabled on ${pluginKey} source`;
+      logger.info('iam_provision_identity: JML joiner skipped', {
+        jobId: String(job.id), tenantId, identityId, pluginKey, reason,
+      });
+      return { status: 'skipped', jobType: 'iam_provision_identity', reason };
+    }
+    if (!autoProvision) {
+      const reason = `autoProvisionUsers disabled on ${pluginKey} source`;
+      logger.info('iam_provision_identity: JML joiner skipped', {
+        jobId: String(job.id), tenantId, identityId, pluginKey, reason,
+      });
+      return { status: 'skipped', jobType: 'iam_provision_identity', reason };
+    }
   }
 
   const identityType = identity.type;
