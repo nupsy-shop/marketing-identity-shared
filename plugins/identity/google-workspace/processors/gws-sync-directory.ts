@@ -90,6 +90,32 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     };
   }
 
+  const syncUsersEnabled = connConfig.syncUsers !== false;   // default true
+  const syncGroupsEnabled = connConfig.syncGroups !== false; // default true
+
+  if (!syncUsersEnabled && !syncGroupsEnabled) {
+    logger.info('gws_sync_directory: both sync types disabled, skipped', {
+      jobId: String(job.id), tenantId, sourceId,
+    });
+    // Still advance next_sync_at so the schedule keeps ticking.
+    await prisma.identity_sources.update({
+      where: { id: sourceId },
+      data: {
+        last_sync_at: new Date(),
+        last_sync_status: 'success',
+        last_sync_error: null,
+        last_sync_stats: stats,
+        next_sync_at: new Date(Date.now() + (source.sync_interval_hours || 6) * 60 * 60 * 1000),
+        updated_at: new Date(),
+      },
+    });
+    return {
+      status: 'skipped',
+      jobType: 'gws_sync_directory',
+      reason: 'syncUsers and syncGroups both disabled',
+    };
+  }
+
   logger.info('gws_sync_directory: starting sync', { jobId: String(job.id), tenantId, sourceId, domain });
 
   publishAuditEvent({
@@ -102,153 +128,157 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     context: { jobId: String(job.id), syncType: 'full', pluginKey: 'google-workspace' },
   }).catch(() => {});
 
+  const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
+  const groupChangesByUser = new Map<string, { added: string[]; removed: string[] }>();
+
   // 4. Sync users (paginated).
   // Principal lifecycle events (joiner/leaver/suspend/unsuspend) are
   // computed post-sync by `jml_detect_lifecycle`. This processor only
   // refreshes the mirror + captures attribute changes for future mover work.
-  let userPageToken: string | undefined;
-  const seenUserEmails = new Set<string>();
-  const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
-
-  do {
-    const page = await fetchUsers(accessToken, domain, userPageToken);
-    for (const user of page.users ?? []) {
-      // Capture previous department/title for attribute-based mover detection
-      const existingUser = await prisma.gws_directory_users.findFirst({
-        where: { source_id: sourceId, email: user.primaryEmail },
-        select: { department: true, job_title: true, is_suspended: true },
-      });
-      await upsertGwsUser(prisma, sourceId, tenantId, user);
-      // Track attribute changes for mover detection
-      if (existingUser) {
-        const orgs = (user as any).organizations as Array<{ department?: string; title?: string }> | undefined;
-        const newDept = orgs?.[0]?.department || null;
-        const newTitle = orgs?.[0]?.title || null;
-        if (existingUser.department !== newDept && (existingUser.department || newDept)) {
-          attributeChanges.push({
-            userExternalId: user.primaryEmail,
-            userEmail: user.primaryEmail,
-            attribute: 'department',
-            oldValue: existingUser.department,
-            newValue: newDept,
-          });
-        }
-        if (existingUser.job_title !== newTitle && (existingUser.job_title || newTitle)) {
-          attributeChanges.push({
-            userExternalId: user.primaryEmail,
-            userEmail: user.primaryEmail,
-            attribute: 'job_title',
-            oldValue: existingUser.job_title,
-            newValue: newTitle,
-          });
-        }
-      }
-      seenUserEmails.add(user.primaryEmail);
-      stats.usersUpserted++;
-    }
-    userPageToken = page.nextPageToken;
-  } while (userPageToken);
-
-  // Mark users not seen as inactive
-  const allActiveGws = await prisma.gws_directory_users.findMany({
-    where: { source_id: sourceId, is_active: true },
-    select: { id: true, email: true },
-  });
-  const toDeactivate = allActiveGws
-    .filter((u: any) => !seenUserEmails.has(u.email))
-    .map((u: any) => u.id);
-  if (toDeactivate.length > 0) {
-    await prisma.gws_directory_users.updateMany({
-      where: { id: { in: toDeactivate } },
-      data: { is_active: false, updated_at: new Date() },
-    });
-  }
-
-  // 5. Sync groups (paginated)
-  let groupPageToken: string | undefined;
-  const groupDbIds = new Map<string, string>(); // googleGroupId -> dbId
-
-  do {
-    const page = await fetchGroups(accessToken, domain, groupPageToken);
-    for (const group of page.groups ?? []) {
-      const groupDbId = await upsertGwsGroup(prisma, sourceId, tenantId, group);
-      groupDbIds.set(group.id, groupDbId);
-      stats.groupsUpserted++;
-    }
-    groupPageToken = page.nextPageToken;
-  } while (groupPageToken);
-
-  // 6. Sync memberships for each group
-  const groups = await prisma.gws_groups.findMany({
-    where: { source_id: sourceId, is_active: true },
-    select: { id: true, google_group_id: true },
-  });
-
-  const groupChangesByUser = new Map<string, { added: string[]; removed: string[] }>();
-
-  for (const group of groups) {
-    const members: { userId: string; role: string; email: string }[] = [];
-    let memberPageToken: string | undefined;
+  if (syncUsersEnabled) {
+    let userPageToken: string | undefined;
+    const seenUserEmails = new Set<string>();
 
     do {
-      const page = await fetchGroupMembers(accessToken, group.google_group_id, memberPageToken);
-      const userMembers = (page.members ?? []).filter((m: GoogleMember) => m.type === 'USER');
-      for (const m of userMembers) {
-        members.push({ userId: m.id, role: m.role, email: m.email });
+      const page = await fetchUsers(accessToken, domain, userPageToken);
+      for (const user of page.users ?? []) {
+        // Capture previous department/title for attribute-based mover detection
+        const existingUser = await prisma.gws_directory_users.findFirst({
+          where: { source_id: sourceId, email: user.primaryEmail },
+          select: { department: true, job_title: true, is_suspended: true },
+        });
+        await upsertGwsUser(prisma, sourceId, tenantId, user);
+        // Track attribute changes for mover detection
+        if (existingUser) {
+          const orgs = (user as any).organizations as Array<{ department?: string; title?: string }> | undefined;
+          const newDept = orgs?.[0]?.department || null;
+          const newTitle = orgs?.[0]?.title || null;
+          if (existingUser.department !== newDept && (existingUser.department || newDept)) {
+            attributeChanges.push({
+              userExternalId: user.primaryEmail,
+              userEmail: user.primaryEmail,
+              attribute: 'department',
+              oldValue: existingUser.department,
+              newValue: newDept,
+            });
+          }
+          if (existingUser.job_title !== newTitle && (existingUser.job_title || newTitle)) {
+            attributeChanges.push({
+              userExternalId: user.primaryEmail,
+              userEmail: user.primaryEmail,
+              attribute: 'job_title',
+              oldValue: existingUser.job_title,
+              newValue: newTitle,
+            });
+          }
+        }
+        seenUserEmails.add(user.primaryEmail);
+        stats.usersUpserted++;
       }
-      memberPageToken = page.nextPageToken;
-    } while (memberPageToken);
+      userPageToken = page.nextPageToken;
+    } while (userPageToken);
 
-    const membershipChanges = await syncGwsMemberships(prisma, group.id, tenantId, members);
-    // Aggregate group changes by user email
-    for (const email of membershipChanges.added) {
-      if (!groupChangesByUser.has(email)) groupChangesByUser.set(email, { added: [], removed: [] });
-      groupChangesByUser.get(email)!.added.push(group.id);
+    // Mark users not seen as inactive
+    const allActiveGws = await prisma.gws_directory_users.findMany({
+      where: { source_id: sourceId, is_active: true },
+      select: { id: true, email: true },
+    });
+    const toDeactivate = allActiveGws
+      .filter((u: any) => !seenUserEmails.has(u.email))
+      .map((u: any) => u.id);
+    if (toDeactivate.length > 0) {
+      await prisma.gws_directory_users.updateMany({
+        where: { id: { in: toDeactivate } },
+        data: { is_active: false, updated_at: new Date() },
+      });
     }
-    for (const email of membershipChanges.removed) {
-      if (!groupChangesByUser.has(email)) groupChangesByUser.set(email, { added: [], removed: [] });
-      groupChangesByUser.get(email)!.removed.push(group.id);
-    }
-    stats.membershipsProcessed += members.length;
   }
 
-  // 6.5 RBAC Drift Detection — find mappings referencing deleted GWS groups
-  const activeGwsGroupIds = (await prisma.gws_groups.findMany({
-    where: { source_id: sourceId, is_active: true },
-    select: { id: true },
-  })).map((g: any) => g.id);
+  if (syncGroupsEnabled) {
+    // 5. Sync groups (paginated)
+    let groupPageToken: string | undefined;
+    const groupDbIds = new Map<string, string>(); // googleGroupId -> dbId
 
-  const staleMappings = await prisma.idp_role_mappings.findMany({
-    where: {
-      agency_id: tenantId,
-      source_type: 'gws',
-      source_group_id: { notIn: activeGwsGroupIds },
-      is_active: true,
-    },
-    select: { id: true, role: true, source_group_id: true },
-  });
+    do {
+      const page = await fetchGroups(accessToken, domain, groupPageToken);
+      for (const group of page.groups ?? []) {
+        const groupDbId = await upsertGwsGroup(prisma, sourceId, tenantId, group);
+        groupDbIds.set(group.id, groupDbId);
+        stats.groupsUpserted++;
+      }
+      groupPageToken = page.nextPageToken;
+    } while (groupPageToken);
 
-  if (staleMappings.length > 0) {
-    logger.warn('gws_sync_directory: RBAC drift detected — stale group mappings', {
-      tenantId, sourceId,
-      staleMappings: staleMappings.map((m: any) => ({ id: m.id, role: m.role, groupId: m.source_group_id })),
+    // 6. Sync memberships for each group
+    const groups = await prisma.gws_groups.findMany({
+      where: { source_id: sourceId, is_active: true },
+      select: { id: true, google_group_id: true },
     });
 
-    // Mark stale mappings as inactive
-    await prisma.idp_role_mappings.updateMany({
-      where: { id: { in: staleMappings.map((m: any) => m.id) } },
-      data: { is_active: false, updated_at: new Date() },
+    for (const group of groups) {
+      const members: { userId: string; role: string; email: string }[] = [];
+      let memberPageToken: string | undefined;
+
+      do {
+        const page = await fetchGroupMembers(accessToken, group.google_group_id, memberPageToken);
+        const userMembers = (page.members ?? []).filter((m: GoogleMember) => m.type === 'USER');
+        for (const m of userMembers) {
+          members.push({ userId: m.id, role: m.role, email: m.email });
+        }
+        memberPageToken = page.nextPageToken;
+      } while (memberPageToken);
+
+      const membershipChanges = await syncGwsMemberships(prisma, group.id, tenantId, members);
+      // Aggregate group changes by user email
+      for (const email of membershipChanges.added) {
+        if (!groupChangesByUser.has(email)) groupChangesByUser.set(email, { added: [], removed: [] });
+        groupChangesByUser.get(email)!.added.push(group.id);
+      }
+      for (const email of membershipChanges.removed) {
+        if (!groupChangesByUser.has(email)) groupChangesByUser.set(email, { added: [], removed: [] });
+        groupChangesByUser.get(email)!.removed.push(group.id);
+      }
+      stats.membershipsProcessed += members.length;
+    }
+
+    // 6.5 RBAC Drift Detection — find mappings referencing deleted GWS groups
+    const activeGwsGroupIds = (await prisma.gws_groups.findMany({
+      where: { source_id: sourceId, is_active: true },
+      select: { id: true },
+    })).map((g: any) => g.id);
+
+    const staleMappings = await prisma.idp_role_mappings.findMany({
+      where: {
+        agency_id: tenantId,
+        source_type: 'gws',
+        source_group_id: { notIn: activeGwsGroupIds },
+        is_active: true,
+      },
+      select: { id: true, role: true, source_group_id: true },
     });
 
-    publishAuditEvent({
-      eventType: 'rbac.drift.detected',
-      source: 'gws_sync_directory',
-      severity: 'warning',
-      actor: { id: null, type: 'system' },
-      agency: { id: tenantId },
-      resource: { type: 'idp_role_mappings', id: sourceId },
-      context: { staleMappingCount: staleMappings.length, staleMappings },
-    }).catch(() => {});
+    if (staleMappings.length > 0) {
+      logger.warn('gws_sync_directory: RBAC drift detected — stale group mappings', {
+        tenantId, sourceId,
+        staleMappings: staleMappings.map((m: any) => ({ id: m.id, role: m.role, groupId: m.source_group_id })),
+      });
+
+      // Mark stale mappings as inactive
+      await prisma.idp_role_mappings.updateMany({
+        where: { id: { in: staleMappings.map((m: any) => m.id) } },
+        data: { is_active: false, updated_at: new Date() },
+      });
+
+      publishAuditEvent({
+        eventType: 'rbac.drift.detected',
+        source: 'gws_sync_directory',
+        severity: 'warning',
+        actor: { id: null, type: 'system' },
+        agency: { id: tenantId },
+        resource: { type: 'idp_role_mappings', id: sourceId },
+        context: { staleMappingCount: staleMappings.length, staleMappings },
+      }).catch(() => {});
+    }
   }
 
   // 7. Auto-link directory users to app users by email
