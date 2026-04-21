@@ -75,6 +75,36 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
   };
 
   try {
+    // Toggle gating — operator-controlled via Settings drawer. Defaults
+    // preserve pre-toggle behavior (both true when absent from config).
+    const connConfig = (source.connection_config || {}) as Record<string, unknown>;
+    const syncUsersEnabled = connConfig.syncUsers !== false;
+    const syncGroupsEnabled = connConfig.syncGroups !== false;
+
+    if (!syncUsersEnabled && !syncGroupsEnabled) {
+      logger.info('entra_sync_directory: both sync types disabled, skipped', {
+        jobId: String(job.id), tenantId, sourceId,
+      });
+      // Still advance next_sync_at so the schedule keeps ticking; operator
+      // may re-enable either toggle later without the row being stuck.
+      await prisma.identity_sources.update({
+        where: { id: sourceId },
+        data: {
+          last_sync_at: new Date(),
+          last_sync_status: 'success',
+          last_sync_error: null,
+          last_sync_stats: stats,
+          next_sync_at: new Date(Date.now() + (source.sync_interval_hours || 6) * 60 * 60 * 1000),
+          updated_at: new Date(),
+        },
+      });
+      return {
+        status: 'skipped',
+        jobType: 'entra_sync_directory',
+        reason: 'syncUsers and syncGroups both disabled',
+      };
+    }
+
     // 2. Resolve access token via client credentials
     const accessToken = await resolveAccessToken(prisma, source, logger);
     if (!accessToken) {
@@ -85,6 +115,8 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       jobId: String(job.id),
       tenantId,
       sourceId,
+      syncUsersEnabled,
+      syncGroupsEnabled,
     });
 
     publishAuditEvent({
@@ -97,10 +129,16 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       context: { jobId: String(job.id), syncType: 'full', pluginKey: 'entra-id' },
     }).catch(() => {});
 
-    // 3. Fetch and upsert users
-    const seenEmails = new Set<string>();
+    // Declared at top scope so the lifecycle-payload step (10) can read it
+    // regardless of which branch ran. Empty when users block is skipped.
     const attributeChanges: Array<{ userExternalId: string; userEmail: string; attribute: string; oldValue: string | null; newValue: string | null }> = [];
-    const users = await fetchUsers(accessToken);
+    const groupChangesByUser = new Map<string, { added: string[]; removed: string[] }>();
+    let users: EntraUser[] = [];
+
+    // 3. Fetch and upsert users
+    if (syncUsersEnabled) {
+    const seenEmails = new Set<string>();
+    users = await fetchUsers(accessToken);
 
     for (const user of users) {
       const email = (user.mail || user.userPrincipalName)?.toLowerCase();
@@ -167,7 +205,9 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       });
       stats.usersDeactivated = toDeactivateEmails.length;
     }
+    } // end if (syncUsersEnabled)
 
+    if (syncGroupsEnabled) {
     // 5. Fetch and upsert groups
     const seenGroupIds = new Set<string>(); // entra_group_id values seen this sync
     const groups = await fetchGroups(accessToken);
@@ -198,9 +238,6 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       select: { id: true, entra_group_id: true },
     });
 
-    // groupChanges map: entra_user_id → { added: groupDbId[], removed: groupDbId[] }
-    const groupChangesByUser = new Map<string, { added: string[]; removed: string[] }>();
-
     for (const dbGroup of activeGroups) {
       const members = await fetchGroupMembers(accessToken, dbGroup.entra_group_id);
       const membershipChanges = await syncEntraMemberships(sourceId, dbGroup.id, tenantId, members);
@@ -214,6 +251,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       }
       stats.membershipsProcessed += members.length;
     }
+    } // end if (syncGroupsEnabled)
 
     // 7. autoLinkByEmail is disabled — identity_links FK targets directory_users
     // which this sync no longer writes to. Re-enable after Phase 6 migrates
