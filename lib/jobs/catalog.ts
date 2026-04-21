@@ -142,6 +142,8 @@ export const JOB_CATALOG = {
   gws_add_group_member:           { queue: QUEUE_NAMES.PROVISIONING },
   gws_remove_group_member:        { queue: QUEUE_NAMES.PROVISIONING },
   saml_client_configure:     { queue: QUEUE_NAMES.PROVISIONING },
+  gws_disconnect:            { queue: QUEUE_NAMES.PROVISIONING },
+  entra_disconnect:          { queue: QUEUE_NAMES.PROVISIONING },
   // issue #51 — per-identity credential rotation. Enqueued by the
   // `rotate_credentials_for_agency` scan, one job per identity due.
   // Web-side handler (KMS/vault + rotation providers) is a follow-up;

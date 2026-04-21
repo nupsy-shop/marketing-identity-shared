@@ -5,6 +5,7 @@ export default {
   entra_remove_group_member: () => import('./entra-remove-group-member.js'),
   entra_poll_audit: () => import('./entra-poll-audit.js'),
   entra_sync_directory: () => import('./entra-sync-directory.js'),
+  entra_disconnect: () => import('./entra-disconnect.js'),
 };
 
 export const concurrency = {
@@ -14,4 +15,5 @@ export const concurrency = {
   entra_remove_group_member: 2,
   entra_poll_audit: 1,
   entra_sync_directory: 1,
+  entra_disconnect: 1,
 };

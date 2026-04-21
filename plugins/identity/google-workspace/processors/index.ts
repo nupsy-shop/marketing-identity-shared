@@ -5,6 +5,7 @@ export default {
   gws_poll_audit: () => import('./gws-poll-audit.js'),
   gws_add_group_member: () => import('./gws-add-group-member.js'),
   gws_remove_group_member: () => import('./gws-remove-group-member.js'),
+  gws_disconnect: () => import('./gws-disconnect.js'),
 };
 
 // Max concurrent jobs per tenant for each job type.
@@ -17,4 +18,5 @@ export const concurrency = {
   gws_poll_audit: 1,
   gws_add_group_member: 1,
   gws_remove_group_member: 1,
+  gws_disconnect: 1,
 };
