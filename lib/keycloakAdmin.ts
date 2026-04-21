@@ -276,6 +276,42 @@ export async function verifySamlClient(
   return { verified: true };
 }
 
+/**
+ * Delete the Keycloak SAML client that matches `spEntityId`. Idempotent:
+ * returns `{ deleted: false }` if the client is already gone (either not
+ * in the list, or 404 on DELETE due to a concurrent race).
+ *
+ * Caller must ensure the realm exists. Throws on non-404 HTTP errors so
+ * callers can distinguish transient Keycloak failures from steady state.
+ */
+export async function deleteKeycloakSamlClient(
+  realm: string,
+  spEntityId: string,
+): Promise<{ deleted: boolean }> {
+  const listRes = await adminFetch(realm, '/clients');
+  if (!listRes.ok) {
+    throw new Error(`listClients failed: HTTP ${listRes.status}`);
+  }
+  const clients = (await listRes.json()) as Array<{
+    id: string;
+    clientId: string;
+    protocol: string;
+  }>;
+  const samlClient = clients.find(
+    (c) => c.protocol === 'saml' && c.clientId === spEntityId,
+  );
+  if (!samlClient) return { deleted: false };
+
+  const delRes = await adminFetch(realm, `/clients/${samlClient.id}`, {
+    method: 'DELETE',
+  });
+  if (delRes.status === 404) return { deleted: false };
+  if (!delRes.ok) {
+    throw new Error(`deleteClient failed: HTTP ${delRes.status}`);
+  }
+  return { deleted: true };
+}
+
 // ─── Email actions ─────────────────────────────────────────────────────────
 
 export async function sendKeycloakActionsEmail(
