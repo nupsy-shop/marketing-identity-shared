@@ -41,7 +41,7 @@ export default async function gwsRemoveGroupMember(job: Bull.Job): Promise<JobRe
     publishAuditEvent({
       eventType: 'directory.group.writeback.removed',
       source: 'google-workspace', severity: 'info',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'local_directory_groups', id: localGroupId },
       context: { localGroupId, userId, linkedGroupExternalId, pluginKey: 'google-workspace', sourceId },

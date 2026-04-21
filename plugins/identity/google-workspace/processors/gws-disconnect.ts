@@ -86,7 +86,9 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
     const spEntityId = cfg.samlSpEntityId as string | undefined;
     if (spEntityId && isKeycloakAdminConfigured()) {
       const { keycloakRealm } = await getAgencyKeycloakConfig(tenantId);
-      await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
+      if (keycloakRealm) {
+        await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
+      }
     }
 
     // Step 3 — no-op for GWS.
@@ -119,7 +121,7 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
       eventType: 'identity.source.disconnected',
       source: 'google-workspace',
       severity: 'info',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'identity_sources', id: sourceId },
       context: { pluginKey: 'google-workspace', triggeredBy: (job.data as { triggeredBy?: string }).triggeredBy },
@@ -146,7 +148,7 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
       eventType: 'identity.source.disconnect.failed',
       source: 'google-workspace',
       severity: 'error',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'identity_sources', id: sourceId },
       context: { pluginKey: 'google-workspace', error: message },

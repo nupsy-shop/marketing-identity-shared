@@ -83,7 +83,7 @@ async function handleWriteback(job: Bull.Job): Promise<JobResult> {
     publishAuditEvent({
       eventType: 'directory.group.writeback.added',
       source: 'entra-id', severity: 'info',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'local_directory_groups', id: localGroupId },
       context: { localGroupId, userId, linkedGroupExternalId, pluginKey: 'entra-id', sourceId },
@@ -98,7 +98,7 @@ async function handleWriteback(job: Bull.Job): Promise<JobResult> {
       publishAuditEvent({
         eventType: 'directory.group.writeback.added',
         source: 'entra-id', severity: 'info',
-        actor: { type: 'system' },
+        actor: { id: null, type: 'system' },
         agency: { id: tenantId },
         resource: { type: 'local_directory_groups', id: localGroupId },
         context: { localGroupId, userId, linkedGroupExternalId, pluginKey: 'entra-id', sourceId, alreadyMember: true },

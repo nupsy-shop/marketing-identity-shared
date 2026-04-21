@@ -44,7 +44,7 @@ export default async function gwsAddGroupMember(job: Bull.Job): Promise<JobResul
     publishAuditEvent({
       eventType: 'directory.group.writeback.added',
       source: 'google-workspace', severity: 'info',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'local_directory_groups', id: localGroupId },
       context: { localGroupId, userId, linkedGroupExternalId, pluginKey: 'google-workspace', sourceId },
@@ -56,7 +56,7 @@ export default async function gwsAddGroupMember(job: Bull.Job): Promise<JobResul
     publishAuditEvent({
       eventType: 'directory.group.writeback.added',
       source: 'google-workspace', severity: 'info',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'local_directory_groups', id: localGroupId },
       context: { localGroupId, userId, linkedGroupExternalId, pluginKey: 'google-workspace', sourceId, alreadyMember: true },

@@ -36,7 +36,7 @@ const JOB_NAME_MAP: Record<string, Record<'add' | 'remove', string>> = {
   'entra-id': { add: 'entra_add_group_member', remove: 'entra_remove_group_member' },
 };
 
-function skipped(reason: string, logger: { info: (msg: string, meta?: unknown) => void }, jobId: string, ctx: Record<string, unknown>): JobResult {
+function skipped(reason: string, logger: { info(msg: string, ctx?: Record<string, unknown>): void }, jobId: string, ctx: Record<string, unknown>): JobResult {
   logger.info('local_group_writeback_dispatch: skipped', { jobId, reason, ...ctx });
   return { status: 'skipped', jobType: 'local_group_writeback_dispatch', reason };
 }

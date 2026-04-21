@@ -71,13 +71,15 @@ export default async function entraDisconnect(job: Bull.Job): Promise<JobResult>
     // Step 2 — delete Keycloak SAML client
     if (isKeycloakAdminConfigured()) {
       const { keycloakRealm } = await getAgencyKeycloakConfig(tenantId);
-      const spEntityId = cfg.samlSpEntityId as string | undefined;
-      if (spEntityId) {
-        await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
-      }
+      if (keycloakRealm) {
+        const spEntityId = cfg.samlSpEntityId as string | undefined;
+        if (spEntityId) {
+          await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
+        }
 
-      // Step 3 — delete Entra IdP broker (single fixed alias)
-      await deleteRealmIdentityProvider(keycloakRealm, ENTRA_IDP_ALIAS);
+        // Step 3 — delete Entra IdP broker (single fixed alias)
+        await deleteRealmIdentityProvider(keycloakRealm, ENTRA_IDP_ALIAS);
+      }
     }
 
     // Step 4 — deactivate OAuth token row
@@ -108,7 +110,7 @@ export default async function entraDisconnect(job: Bull.Job): Promise<JobResult>
       eventType: 'identity.source.disconnected',
       source: 'entra-id',
       severity: 'info',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'identity_sources', id: sourceId },
       context: { pluginKey: 'entra-id', triggeredBy: (job.data as { triggeredBy?: string }).triggeredBy },
@@ -135,7 +137,7 @@ export default async function entraDisconnect(job: Bull.Job): Promise<JobResult>
       eventType: 'identity.source.disconnect.failed',
       source: 'entra-id',
       severity: 'error',
-      actor: { type: 'system' },
+      actor: { id: null, type: 'system' },
       agency: { id: tenantId },
       resource: { type: 'identity_sources', id: sourceId },
       context: { pluginKey: 'entra-id', error: message },
