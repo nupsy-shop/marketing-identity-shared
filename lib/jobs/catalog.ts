@@ -138,6 +138,9 @@ export const JOB_CATALOG = {
   entra_unsuspend_user:      { queue: QUEUE_NAMES.PROVISIONING },
   entra_add_group_member:    { queue: QUEUE_NAMES.PROVISIONING },
   entra_remove_group_member: { queue: QUEUE_NAMES.PROVISIONING },
+  local_group_writeback_dispatch: { queue: QUEUE_NAMES.PROVISIONING },
+  gws_add_group_member:           { queue: QUEUE_NAMES.PROVISIONING },
+  gws_remove_group_member:        { queue: QUEUE_NAMES.PROVISIONING },
   saml_client_configure:     { queue: QUEUE_NAMES.PROVISIONING },
   // issue #51 — per-identity credential rotation. Enqueued by the
   // `rotate_credentials_for_agency` scan, one job per identity due.

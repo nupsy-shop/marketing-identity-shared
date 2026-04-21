@@ -6,6 +6,7 @@ export default {
   iam_enable_app_user: () => import('./iam-enable-app-user.js'),
   iam_deprovision_app_user: () => import('./iam-deprovision-app-user.js'),
   local_dir_poll_audit: () => import('./local-dir-poll-audit.js'),
+  local_group_writeback_dispatch: () => import('./local-group-writeback-dispatch.js'),
 };
 
 export const concurrency = {
@@ -14,4 +15,5 @@ export const concurrency = {
   iam_enable_app_user: 2,
   iam_deprovision_app_user: 2,
   local_dir_poll_audit: 1,
+  local_group_writeback_dispatch: 2,
 };
