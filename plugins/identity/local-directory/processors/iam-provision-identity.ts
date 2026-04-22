@@ -11,7 +11,8 @@
  * Other IAM operations use separate job types:
  *   iam_provision_app_user  — local directory users
  *   iam_provision_realm     — agency realm setup
- *   saml_client_configure   — SAML SSO config
+ *   gws_saml_client_configure   — Google Workspace SAML client provisioning
+ *   entra_saml_client_configure — Entra ID SAML client provisioning (urn:federation:MicrosoftOnline)
  */
 
 import type Bull from 'bull';
