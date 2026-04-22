@@ -139,6 +139,17 @@ export async function getKeycloakUser(realm: string, userId: string): Promise<Ke
   return res.json();
 }
 
+/**
+ * List all users in a Keycloak realm. Keycloak's `max=-1` convention returns
+ * every user in a single page. Use for drift-detection / full-realm scans.
+ * Returns [] on any non-2xx.
+ */
+export async function listRealmUsers(realm: string): Promise<KeycloakUser[]> {
+  const res = await adminFetch(realm, '/users?max=-1');
+  if (!res.ok) return [];
+  return res.json();
+}
+
 export async function createKeycloakUser(
   user: Partial<KeycloakUser> & { realm?: string },
 ): Promise<KeycloakUser> {
