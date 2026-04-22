@@ -136,7 +136,8 @@ export const JOB_CATALOG = {
   local_group_writeback_dispatch: { queue: QUEUE_NAMES.PROVISIONING },
   gws_add_group_member:           { queue: QUEUE_NAMES.PROVISIONING },
   gws_remove_group_member:        { queue: QUEUE_NAMES.PROVISIONING },
-  saml_client_configure:     { queue: QUEUE_NAMES.PROVISIONING },
+  gws_saml_client_configure:   { queue: QUEUE_NAMES.PROVISIONING },
+  entra_saml_client_configure: { queue: QUEUE_NAMES.PROVISIONING },
   gws_disconnect:            { queue: QUEUE_NAMES.PROVISIONING },
   entra_disconnect:          { queue: QUEUE_NAMES.PROVISIONING },
   // issue #51 — per-identity credential rotation. Enqueued by the
