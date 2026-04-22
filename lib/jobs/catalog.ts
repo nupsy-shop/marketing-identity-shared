@@ -15,9 +15,8 @@
  *   automation      — cron-driven polling and chained automation.
  *                     Tenant-scoped; fans out per agency.
  *                     (entra_poll_audit, gws_poll_audit,
- *                     local_dir_poll_audit, detect_drift,
- *                     enforce_retention, discover_assets,
- *                     jml_process_lifecycle)
+ *                     detect_drift, enforce_retention,
+ *                     discover_assets, jml_process_lifecycle)
  *
  *   directory-sync  — directory state reconciliation from upstream IdPs.
  *                     Tenant-scoped; triggered by user or by a
@@ -69,10 +68,6 @@ export const JOB_CATALOG = {
   // See docs/superpowers/specs/2026-04-19-plugin-owned-platform-audit-polling-design.md.
   entra_poll_audit:           { queue: QUEUE_NAMES.AUTOMATION },
   gws_poll_audit:             { queue: QUEUE_NAMES.AUTOMATION },
-  // issue #88 — Local Directory (Keycloak-backed) per-agency audit poll.
-  // Always enqueued by dispatch_poll_audits — no "enabled" toggle; Local
-  // Directory audit ingestion is locked on.
-  local_dir_poll_audit:       { queue: QUEUE_NAMES.AUTOMATION },
   // issue #101 — per-platform audit polls (plugin-owned processors).
   meta_poll_audit:            { queue: QUEUE_NAMES.AUTOMATION },
   google_ads_poll_audit:      { queue: QUEUE_NAMES.AUTOMATION },
