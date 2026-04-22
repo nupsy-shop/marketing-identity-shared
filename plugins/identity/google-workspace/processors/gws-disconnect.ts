@@ -22,8 +22,8 @@ import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
 import { deleteKeycloakSamlClient, isKeycloakAdminConfigured } from '../../../../lib/keycloakAdmin.js';
-import { deactivateOAuthToken } from '@/lib/db/oauth';
-import { getAgencyKeycloakConfig } from '@/lib/db/settings';
+// These were web-app-only helpers (`@/lib/db/...`). Inlined below as
+// runtime Prisma calls so this processor is portable to the worker.
 
 interface JobResult {
   status: 'completed' | 'skipped';
@@ -85,7 +85,13 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
     // Step 2 — delete Keycloak SAML client
     const spEntityId = cfg.samlSpEntityId as string | undefined;
     if (spEntityId && isKeycloakAdminConfigured()) {
-      const { keycloakRealm } = await getAgencyKeycloakConfig(tenantId);
+      // Inline of getAgencyKeycloakConfig(tenantId).
+      const settings = await prisma.agency_settings.findFirst({
+        where: { agency_id: tenantId },
+        select: { keycloakRealm: true, keycloakRealmStatus: true },
+      });
+      const keycloakRealm =
+        settings?.keycloakRealmStatus === 'active' ? settings.keycloakRealm : null;
       if (keycloakRealm) {
         await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
       }
@@ -93,9 +99,12 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
 
     // Step 3 — no-op for GWS.
 
-    // Step 4 — deactivate OAuth token row
+    // Step 4 — deactivate OAuth token row (inline of deactivateOAuthToken)
     if (source.oauth_token_id) {
-      await deactivateOAuthToken(source.oauth_token_id);
+      await prisma.oauth_tokens.update({
+        where: { id: source.oauth_token_id },
+        data: { isActive: false, updatedAt: new Date() },
+      });
     }
 
     // Step 5 — clear SSO config + flip state to disconnected
