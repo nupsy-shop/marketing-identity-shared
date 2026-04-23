@@ -95,28 +95,55 @@ interface Discovery {
   end_session_endpoint?: string;
 }
 
-async function discoverIssuer(issuerUrl: string): Promise<Discovery> {
+async function discoverIssuer(issuerUrl: string, agencyId: string): Promise<Discovery> {
   const normalized = issuerUrl.replace(/\/+$/, '');
   const url = `${normalized}/.well-known/openid-configuration`;
-  let res: Response;
-  try {
-    res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`discovery_failed: network error fetching ${url}: ${msg}`);
-  }
-  if (!res.ok) {
-    throw new Error(`discovery_failed: ${url} returned HTTP ${res.status}`);
-  }
+
+  // E2E provider-response override bridge (phase-3). When the host
+  // registered a resolver AND a matching override row exists, short-circuit
+  // the real fetch with the forced status/body. Fail-closed: resolver
+  // errors fall through to the real network path.
   let body: any;
+  let overrideStatus: number | null = null;
   try {
-    body = await res.json();
-  } catch (err) {
-    throw new Error(`discovery_failed: malformed JSON from ${url}`);
+    const { resolveProviderOverride } = getRuntime();
+    if (resolveProviderOverride) {
+      const ov = await resolveProviderOverride(agencyId, 'keycloak', url);
+      if (ov) {
+        if (ov.delayMs && ov.delayMs > 0) {
+          await new Promise((r) => setTimeout(r, ov.delayMs));
+        }
+        overrideStatus = ov.status;
+        body = ov.body;
+      }
+    }
+  } catch {
+    // Override bridge unavailable — fall through to the real fetch.
   }
+
+  if (overrideStatus === null) {
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`discovery_failed: network error fetching ${url}: ${msg}`);
+    }
+    if (!res.ok) {
+      throw new Error(`discovery_failed: ${url} returned HTTP ${res.status}`);
+    }
+    try {
+      body = await res.json();
+    } catch (err) {
+      throw new Error(`discovery_failed: malformed JSON from ${url}`);
+    }
+  } else if (overrideStatus < 200 || overrideStatus >= 300) {
+    throw new Error(`discovery_failed: ${url} returned HTTP ${overrideStatus}`);
+  }
+
   const required = ['issuer', 'authorization_endpoint', 'token_endpoint', 'jwks_uri'] as const;
   for (const k of required) {
-    if (!body[k] || typeof body[k] !== 'string') {
+    if (!body?.[k] || typeof body[k] !== 'string') {
       throw new Error(`discovery_failed: missing ${k} in discovery payload`);
     }
   }
@@ -254,7 +281,7 @@ export default async function iamUpsertRealmIdp(job: { id?: unknown; data: Upser
       throw new Error('reconcile_failed: missing sso_client_id, sso_client_secret, or sso_issuer_url');
     }
 
-    const discovery = await discoverIssuer(issuerUrl);
+    const discovery = await discoverIssuer(issuerUrl, agencyId);
     const targetAlias = aliasForProvider(desired);
     const idpConfig = buildIdpConfig({ clientId, clientSecret, discovery, issuerUrl });
 

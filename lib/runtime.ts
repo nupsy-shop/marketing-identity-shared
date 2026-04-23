@@ -47,6 +47,30 @@ export interface RuntimeServices {
    * @returns Access token string, or null if unavailable
    */
   resolveGwsAccessToken?: (agencyId: string) => Promise<string | null>;
+  /**
+   * Optional provider-response override resolver, registered by the host.
+   * Plugin processors that make outbound HTTP calls to third-party IdPs
+   * (Keycloak `.well-known/openid-configuration`, GWS, Entra, etc.) consult
+   * this bridge BEFORE dialling the real endpoint. When a matching override
+   * row exists in `provider_response_overrides` it short-circuits the
+   * network call with the forced status/body so E2E tests can drive the
+   * "discovery failed" / "malformed payload" branches deterministically.
+   *
+   * Fail-closed: resolvers should return null on any error (never throw)
+   * and must refuse to apply overrides outside E2E mode. The shared
+   * contract takes `provider` as a wide `string` to keep this module free
+   * of web-app types; hosts narrow it back to their provider union.
+   *
+   * @param agencyId - Agency owning the override row (RLS scope).
+   * @param provider - Short provider name (e.g. 'keycloak', 'gws').
+   * @param url - Full outbound URL; matched against row.endpoint_match.
+   * @returns Forced response envelope, or null to let the real call run.
+   */
+  resolveProviderOverride?: (
+    agencyId: string,
+    provider: string,
+    url: string,
+  ) => Promise<{ status: number; body: unknown; delayMs?: number } | null>;
 }
 
 // Use globalThis to ensure a single instance across compiled modules.
