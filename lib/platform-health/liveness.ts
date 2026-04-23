@@ -21,6 +21,97 @@
 import type { LivenessResult } from './types.js';
 import { getRuntime } from '../runtime.js';
 
+/**
+ * E2E provider-response override hook.
+ *
+ * Sibling of the web-app's `lib/http/provider-override-resolver.ts` — the
+ * resolver lives there; here we read the same `provider_response_overrides`
+ * table inline via the runtime-injected Prisma client so the shared
+ * submodule stays portable (both web and worker ship this code).
+ *
+ * Fail-closed: every error path returns null and the real fetch continues.
+ * Non-prod gated: only active when NODE_ENV !== 'production' OR
+ * E2E_ENABLED === 'true'. Agency-scoped: every read carries `agency_id`.
+ * When a matching row exists, we synthesize a LivenessResult from the forced
+ * status so platform-health @target scenarios (e.g. "GWS admin API returns
+ * 500") can drive deterministic outcomes without touching the real provider.
+ */
+type ProviderName = 'gws' | 'entra' | 'slack' | 'lago' | 'sendgrid' | 'keycloak';
+
+function overridesEnabled(): boolean {
+  if (process.env.NODE_ENV !== 'production') return true;
+  return process.env.E2E_ENABLED === 'true';
+}
+
+async function livenessOverrideFor(
+  agencyId: string,
+  provider: ProviderName,
+  url: string,
+): Promise<LivenessResult | null> {
+  if (!overridesEnabled()) return null;
+  if (!agencyId || !provider || !url) return null;
+
+  let status: number;
+  let delayMs = 0;
+  try {
+    const { prisma } = getRuntime();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (await (prisma as any).provider_response_overrides.findMany({
+      where: { agency_id: agencyId, provider },
+      select: {
+        endpoint_match: true,
+        status: true,
+        delay_ms: true,
+        created_at: true,
+      },
+    })) as Array<{
+      endpoint_match: string;
+      status: number;
+      delay_ms: number;
+      created_at: Date;
+    }>;
+    if (rows.length === 0) return null;
+
+    // Longest substring wins (most specific). Ties → oldest row wins.
+    const matches = rows
+      .filter((r) => r.endpoint_match.length > 0 && url.includes(r.endpoint_match))
+      .sort((a, b) => {
+        if (b.endpoint_match.length !== a.endpoint_match.length) {
+          return b.endpoint_match.length - a.endpoint_match.length;
+        }
+        return a.created_at.getTime() - b.created_at.getTime();
+      });
+    if (matches.length === 0) return null;
+    status = matches[0]!.status;
+    delayMs = matches[0]!.delay_ms ?? 0;
+  } catch {
+    // Fail-closed. Table may not exist yet, or prisma may be unavailable in a
+    // stripped-down runtime. Never throw — the real fetch continues.
+    return null;
+  }
+
+  if (delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  if (status >= 200 && status < 300) {
+    return { ok: true, latencyMs: delayMs };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      ok: false,
+      latencyMs: delayMs,
+      errorCategory: 'auth',
+      errorMessage: `HTTP ${status} (forced override)`,
+    };
+  }
+  return {
+    ok: false,
+    latencyMs: delayMs,
+    errorCategory: status >= 500 ? 'server' : 'unknown',
+    errorMessage: `HTTP ${status} (forced override)`,
+  };
+}
+
 interface SourceForLiveness {
   id: string;
   agencyId: string;
@@ -56,6 +147,22 @@ async function checkEntra(source: SourceForLiveness): Promise<LivenessResult> {
     process.env.ENTRA_ID_CLIENT_SECRET ||
     process.env.MICROSOFT_CLIENT_SECRET;
 
+  // E2E override hook: see tests/support/scripts/seed/set-provider-response.ts.
+  // Checked BEFORE credential validation so platform-health @target scenarios
+  // can simulate the Microsoft token endpoint returning 5xx / 401 / 429
+  // without needing a real Entra tenant. Fail-closed; production path
+  // untouched. The substring match on `login.microsoftonline.com` is stable
+  // regardless of tenant id.
+  const entraProbeUrl = tenantId
+    ? `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`
+    : `https://login.microsoftonline.com/oauth2/v2.0/token`;
+  const earlyEntraOverride = await livenessOverrideFor(
+    source.agencyId,
+    'entra',
+    entraProbeUrl,
+  );
+  if (earlyEntraOverride) return earlyEntraOverride;
+
   if (!tenantId || !clientId || !clientSecret) {
     return {
       ok: false,
@@ -65,10 +172,12 @@ async function checkEntra(source: SourceForLiveness): Promise<LivenessResult> {
     };
   }
 
+  const tokenUrl = entraProbeUrl;
+
   const start = Date.now();
   try {
     const res = await fetch(
-      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+      tokenUrl,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -120,6 +229,17 @@ async function checkGoogleWorkspace(source: SourceForLiveness): Promise<Liveness
   const customerId = cfg.customerId as string | undefined;
   const primaryDomain = cfg.primaryDomain as string | undefined;
 
+  // E2E override hook: see tests/support/scripts/seed/set-provider-response.ts.
+  // Checked BEFORE credential resolution so platform-health @target scenarios
+  // can simulate GWS admin-API 5xx/403/429 without needing real OAuth tokens
+  // on the isolation agency. Fail-closed; production path untouched.
+  const gwsProbeUrl =
+    `https://admin.googleapis.com/admin/directory/v1/users` +
+    (customerId ? `?customer=${encodeURIComponent(customerId)}` : '') +
+    `&maxResults=1&fields=kind`;
+  const earlyGwsOverride = await livenessOverrideFor(source.agencyId, 'gws', gwsProbeUrl);
+  if (earlyGwsOverride) return earlyGwsOverride;
+
   if (!customerId || !primaryDomain) {
     return {
       ok: false,
@@ -161,12 +281,10 @@ async function checkGoogleWorkspace(source: SourceForLiveness): Promise<Liveness
     };
   }
 
+  const url = gwsProbeUrl;
+
   const start = Date.now();
   try {
-    const url =
-      `https://admin.googleapis.com/admin/directory/v1/users` +
-      `?customer=${encodeURIComponent(customerId)}` +
-      `&maxResults=1&fields=kind`;
     const res = await fetch(url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${accessToken}` },
