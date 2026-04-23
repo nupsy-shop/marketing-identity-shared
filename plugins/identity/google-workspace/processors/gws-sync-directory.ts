@@ -140,7 +140,7 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     const seenUserEmails = new Set<string>();
 
     do {
-      const page = await fetchUsers(accessToken, domain, userPageToken);
+      const page = await fetchUsers(accessToken, domain, userPageToken, 200, undefined, tenantId);
       for (const user of page.users ?? []) {
         // Capture previous department/title for attribute-based mover detection
         const existingUser = await prisma.gws_directory_users.findFirst({
@@ -200,7 +200,7 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     const groupDbIds = new Map<string, string>(); // googleGroupId -> dbId
 
     do {
-      const page = await fetchGroups(accessToken, domain, groupPageToken);
+      const page = await fetchGroups(accessToken, domain, groupPageToken, 200, tenantId);
       for (const group of page.groups ?? []) {
         const groupDbId = await upsertGwsGroup(prisma, sourceId, tenantId, group);
         groupDbIds.set(group.id, groupDbId);
@@ -220,7 +220,7 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
       let memberPageToken: string | undefined;
 
       do {
-        const page = await fetchGroupMembers(accessToken, group.google_group_id, memberPageToken);
+        const page = await fetchGroupMembers(accessToken, group.google_group_id, memberPageToken, tenantId);
         const userMembers = (page.members ?? []).filter((m: GoogleMember) => m.type === 'USER');
         for (const m of userMembers) {
           members.push({ userId: m.id, role: m.role, email: m.email });

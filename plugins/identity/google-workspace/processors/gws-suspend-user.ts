@@ -50,7 +50,7 @@ export default async function gwsSuspendUser(job: Bull.Job): Promise<JobResult> 
   const { updateUser } = await import('./api/provisioning.js');
   const userKey = email || googleUserId;
 
-  await updateUser(accessToken, userKey, { suspended: true });
+  await updateUser(accessToken, userKey, { suspended: true }, tenantId);
 
   logger.info('gws_suspend_user: user suspended in Google Workspace', { jobId: String(job.id), userKey });
 

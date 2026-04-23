@@ -12,6 +12,10 @@ import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
 import { loadGwsGroupMemberContext } from './_group-member-preconditions.js';
+import {
+  resolveProviderOverride,
+  applyOverrideDelay,
+} from '../../../../lib/http/provider-override-resolver.js';
 
 interface JobResult {
   status: 'completed' | 'skipped';
@@ -34,11 +38,24 @@ export default async function gwsAddGroupMember(job: Bull.Job): Promise<JobResul
   const { userEmail, groupEmail, accessToken } = pre.ctx;
 
   const url = `https://admin.googleapis.com/admin/directory/v1/groups/${groupEmail}/members`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: userEmail, role: 'MEMBER' }),
-  });
+
+  // E2E provider-response override hook — agency-scoped, non-prod gated.
+  // Short-circuits with a synthetic Response so the live status-handling
+  // branches below (409 idempotent, 404 upstream-deleted, 403 degrade, etc.)
+  // still run unchanged. Fail-closed: null override → real fetch proceeds.
+  const override = await resolveProviderOverride(tenantId, 'gws', url);
+  let res: Response;
+  if (override) {
+    await applyOverrideDelay(override);
+    const bodyStr = override.body == null ? '' : typeof override.body === 'string' ? override.body : JSON.stringify(override.body);
+    res = new Response(bodyStr, { status: override.status });
+  } else {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: userEmail, role: 'MEMBER' }),
+    });
+  }
 
   if (res.ok) {
     publishAuditEvent({

@@ -13,6 +13,10 @@ import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
 import { loadEntraGroupMemberContext } from './_group-member-preconditions.js';
+import {
+  resolveProviderOverride,
+  applyOverrideDelay,
+} from '../../../../lib/http/provider-override-resolver.js';
 
 interface JobResult {
   status: 'completed' | 'skipped';
@@ -48,7 +52,7 @@ export default async function entraAddGroupMember(job: Bull.Job): Promise<JobRes
   if (!accessToken) throw new Error('No valid OAuth token for Entra ID — will retry');
 
   const { addMember } = await import('./api/graph.js');
-  await addMember(accessToken, groupId, userId);
+  await addMember(accessToken, groupId, userId, tenantId);
 
   logger.info('entra_add_group_member: member added to group (mover flow)', {
     jobId: String(job.id), groupId, userId, email,
@@ -71,13 +75,24 @@ async function handleWriteback(job: Bull.Job): Promise<JobResult> {
   const { entraUserId, accessToken } = pre.ctx;
 
   const url = `https://graph.microsoft.com/v1.0/groups/${linkedGroupExternalId}/members/$ref`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${entraUserId}`,
-    }),
-  });
+
+  // E2E provider-response override hook — agency-scoped, non-prod gated.
+  // Fail-closed: null override → real fetch proceeds.
+  const override = await resolveProviderOverride(tenantId, 'entra', url);
+  let res: Response;
+  if (override) {
+    await applyOverrideDelay(override);
+    const bodyStr = override.body == null ? '' : typeof override.body === 'string' ? override.body : JSON.stringify(override.body);
+    res = new Response(bodyStr, { status: override.status });
+  } else {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${entraUserId}`,
+      }),
+    });
+  }
 
   if (res.ok || res.status === 204) {
     publishAuditEvent({

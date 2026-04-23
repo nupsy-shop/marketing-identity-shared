@@ -9,6 +9,10 @@ import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
 import { loadGwsGroupMemberContext } from './_group-member-preconditions.js';
+import {
+  resolveProviderOverride,
+  applyOverrideDelay,
+} from '../../../../lib/http/provider-override-resolver.js';
 
 interface JobResult {
   status: 'completed' | 'skipped';
@@ -31,10 +35,21 @@ export default async function gwsRemoveGroupMember(job: Bull.Job): Promise<JobRe
   const { userEmail, groupEmail, accessToken } = pre.ctx;
 
   const url = `https://admin.googleapis.com/admin/directory/v1/groups/${groupEmail}/members/${userEmail}`;
-  const res = await fetch(url, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+
+  // E2E provider-response override hook — agency-scoped, non-prod gated.
+  // Fail-closed: null override → real fetch proceeds.
+  const override = await resolveProviderOverride(tenantId, 'gws', url);
+  let res: Response;
+  if (override) {
+    await applyOverrideDelay(override);
+    const bodyStr = override.body == null ? '' : typeof override.body === 'string' ? override.body : JSON.stringify(override.body);
+    res = new Response(bodyStr, { status: override.status });
+  } else {
+    res = await fetch(url, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  }
 
   // 204 No Content on success; 404 on already-gone; 409 defensive.
   if (res.ok || res.status === 404 || res.status === 409) {

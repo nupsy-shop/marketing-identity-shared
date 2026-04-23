@@ -50,6 +50,7 @@ export interface EnsureUserResult {
 export async function createUser(
   accessToken: string,
   payload: CreateUserPayload,
+  agencyId?: string,
 ): Promise<GoogleUser> {
   const url = `${ADMIN_API_BASE}/users`;
 
@@ -72,10 +73,15 @@ export async function createUser(
     body.recoveryEmail = payload.recoveryEmail;
   }
 
-  return apiFetch<GoogleUser>(url, accessToken, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
+  return apiFetch<GoogleUser>(
+    url,
+    accessToken,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+    agencyId,
+  );
 }
 
 export async function updateUser(
@@ -88,12 +94,18 @@ export async function updateUser(
     password?: string;
     changePasswordAtNextLogin?: boolean;
   },
+  agencyId?: string,
 ): Promise<GoogleUser> {
   const url = `${ADMIN_API_BASE}/users/${encodeURIComponent(userKey)}`;
-  return apiFetch<GoogleUser>(url, accessToken, {
-    method: 'PUT',
-    body: JSON.stringify(patch),
-  });
+  return apiFetch<GoogleUser>(
+    url,
+    accessToken,
+    {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    },
+    agencyId,
+  );
 }
 
 // ─── Org Unit Operations ────────────────────────────────────────────────────
@@ -102,10 +114,11 @@ export async function getOrgUnit(
   accessToken: string,
   customerId: string,
   orgUnitPath: string,
+  agencyId?: string,
 ): Promise<GoogleOrgUnit> {
   const normalizedPath = orgUnitPath.startsWith('/') ? orgUnitPath.slice(1) : orgUnitPath;
   const url = `${ADMIN_API_BASE}/customer/${encodeURIComponent(customerId)}/orgunits/${encodeURIComponent(normalizedPath)}`;
-  return apiFetch<GoogleOrgUnit>(url, accessToken);
+  return apiFetch<GoogleOrgUnit>(url, accessToken, {}, agencyId);
 }
 
 // ─── Composite Helpers ──────────────────────────────────────────────────────
@@ -119,6 +132,7 @@ export async function ensureUserInOu(
     orgUnitPath: string;
     recoveryEmail?: string;
   },
+  agencyId?: string,
 ): Promise<EnsureUserResult> {
   const { primaryEmail, givenName, familyName, orgUnitPath, recoveryEmail } = params;
   let moved = false;
@@ -126,20 +140,24 @@ export async function ensureUserInOu(
   let user: GoogleUser;
   try {
     const { fetchUser } = await import('./directory.js');
-    user = await fetchUser(accessToken, primaryEmail);
+    user = await fetchUser(accessToken, primaryEmail, agencyId);
   } catch (err: unknown) {
     const error = err as { code?: string };
     if (error.code === 'NOT_FOUND') {
       const password = generateRandomPassword();
-      user = await createUser(accessToken, {
-        primaryEmail,
-        givenName: givenName || 'PAM',
-        familyName: familyName || 'Identity',
-        orgUnitPath,
-        recoveryEmail,
-        password,
-        changePasswordAtNextLogin: false,
-      });
+      user = await createUser(
+        accessToken,
+        {
+          primaryEmail,
+          givenName: givenName || 'PAM',
+          familyName: familyName || 'Identity',
+          orgUnitPath,
+          recoveryEmail,
+          password,
+          changePasswordAtNextLogin: false,
+        },
+        agencyId,
+      );
 
       return {
         userId: user.id,
@@ -155,7 +173,7 @@ export async function ensureUserInOu(
   }
 
   if (user.orgUnitPath !== orgUnitPath) {
-    user = await updateUser(accessToken, primaryEmail, { orgUnitPath });
+    user = await updateUser(accessToken, primaryEmail, { orgUnitPath }, agencyId);
     moved = true;
   }
 

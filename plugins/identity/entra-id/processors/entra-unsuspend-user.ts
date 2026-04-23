@@ -44,7 +44,7 @@ export default async function entraUnsuspendUser(job: Bull.Job): Promise<JobResu
   }
 
   const { updateUser } = await import('./api/graph.js');
-  await updateUser(accessToken, entraUserId, { accountEnabled: true });
+  await updateUser(accessToken, entraUserId, { accountEnabled: true }, tenantId);
 
   logger.info('entra_unsuspend_user: user re-enabled in Entra ID', {
     jobId: String(job.id), entraUserId, email,

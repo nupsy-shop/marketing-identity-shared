@@ -11,6 +11,11 @@
  * web app's plugin directory.
  */
 
+import {
+  resolveProviderOverride,
+  applyOverrideDelay,
+} from '../../../../../lib/http/provider-override-resolver.js';
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const ADMIN_API_BASE = 'https://admin.googleapis.com/admin/directory/v1';
@@ -68,12 +73,61 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Execute a fetch request with retry logic for rate-limit and transient errors.
+ *
+ * When `agencyId` is passed, an E2E provider-response override lookup runs
+ * first; a matching `provider_response_overrides` row short-circuits the real
+ * fetch with the forced status/body/delay. See
+ * shared/lib/http/provider-override-resolver.ts. Fail-closed: the resolver
+ * returns null on any error, falling through to the real HTTP call.
+ * Production callers that don't pass `agencyId` are unaffected.
  */
 export async function apiFetch<T>(
   url: string,
   accessToken: string,
   options: RequestInit = {},
+  agencyId?: string,
 ): Promise<T> {
+  // E2E provider-response override hook — agency-scoped, non-prod gated.
+  if (agencyId) {
+    const override = await resolveProviderOverride(agencyId, 'gws', url);
+    if (override) {
+      await applyOverrideDelay(override);
+      if (override.status >= 400) {
+        const bodyStr =
+          override.body == null
+            ? `forced override ${override.status}`
+            : typeof override.body === 'string'
+              ? override.body
+              : JSON.stringify(override.body);
+        if (override.status === 401) {
+          throw new IdentityPluginError(`Authentication failed: ${bodyStr}`, 'AUTH_ERROR', 401);
+        }
+        if (override.status === 403) {
+          throw new IdentityPluginError(`Permission denied: ${bodyStr}`, 'PERMISSION_DENIED', 403);
+        }
+        if (override.status === 404) {
+          throw new IdentityPluginError(`Resource not found: ${bodyStr}`, 'NOT_FOUND', 404);
+        }
+        if (override.status === 409) {
+          throw new IdentityPluginError(`Conflict: ${bodyStr}`, 'CONFLICT', 409);
+        }
+        if (override.status === 429) {
+          throw new IdentityPluginError(
+            'Google Admin API rate limit exceeded (forced override)',
+            'RATE_LIMITED',
+            429,
+          );
+        }
+        throw new IdentityPluginError(
+          `Google Admin API error (${override.status}): ${bodyStr}`,
+          'PROVIDER_ERROR',
+          override.status,
+        );
+      }
+      return (override.body ?? ({} as T)) as T;
+    }
+  }
+
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     'Content-Type': 'application/json',
@@ -157,9 +211,13 @@ export async function apiFetch<T>(
 /**
  * Fetch a single user by primary email or user ID.
  */
-export async function fetchUser(accessToken: string, userKey: string): Promise<GoogleUser> {
+export async function fetchUser(
+  accessToken: string,
+  userKey: string,
+  agencyId?: string,
+): Promise<GoogleUser> {
   const url = `${ADMIN_API_BASE}/users/${encodeURIComponent(userKey)}`;
-  return apiFetch<GoogleUser>(url, accessToken);
+  return apiFetch<GoogleUser>(url, accessToken, {}, agencyId);
 }
 
 /**
@@ -171,12 +229,13 @@ export async function fetchUsers(
   pageToken?: string,
   maxResults: number = 200,
   query?: string,
+  agencyId?: string,
 ): Promise<{ users?: GoogleUser[]; nextPageToken?: string }> {
   const params = new URLSearchParams({ domain, maxResults: String(maxResults) });
   if (pageToken) params.set('pageToken', pageToken);
   if (query) params.set('query', query);
   const url = `${ADMIN_API_BASE}/users?${params.toString()}`;
-  return apiFetch<{ users?: GoogleUser[]; nextPageToken?: string }>(url, accessToken);
+  return apiFetch<{ users?: GoogleUser[]; nextPageToken?: string }>(url, accessToken, {}, agencyId);
 }
 
 // ─── Group Operations ──────────────────────────────────────────────────────
@@ -208,11 +267,12 @@ export async function fetchGroups(
   domain: string,
   pageToken?: string,
   maxResults: number = 200,
+  agencyId?: string,
 ): Promise<{ groups?: GoogleGroup[]; nextPageToken?: string }> {
   const params = new URLSearchParams({ domain, maxResults: String(maxResults) });
   if (pageToken) params.set('pageToken', pageToken);
   const url = `${ADMIN_API_BASE}/groups?${params.toString()}`;
-  return apiFetch<{ groups?: GoogleGroup[]; nextPageToken?: string }>(url, accessToken);
+  return apiFetch<{ groups?: GoogleGroup[]; nextPageToken?: string }>(url, accessToken, {}, agencyId);
 }
 
 /**
@@ -222,10 +282,11 @@ export async function fetchGroupMembers(
   accessToken: string,
   groupKey: string,
   pageToken?: string,
+  agencyId?: string,
 ): Promise<{ members?: GoogleMember[]; nextPageToken?: string }> {
   const params = new URLSearchParams();
   if (pageToken) params.set('pageToken', pageToken);
   const query = params.toString();
   const url = `${ADMIN_API_BASE}/groups/${encodeURIComponent(groupKey)}/members${query ? `?${query}` : ''}`;
-  return apiFetch<{ members?: GoogleMember[]; nextPageToken?: string }>(url, accessToken);
+  return apiFetch<{ members?: GoogleMember[]; nextPageToken?: string }>(url, accessToken, {}, agencyId);
 }

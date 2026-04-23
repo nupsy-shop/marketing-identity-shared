@@ -6,6 +6,11 @@
  * No @/ aliases — plain ESM with .js extensions.
  */
 
+import {
+  resolveProviderOverride,
+  applyOverrideDelay,
+} from '../../../../../lib/http/provider-override-resolver.js';
+
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 
 async function handleGraphError(res: Response): Promise<never> {
@@ -16,6 +21,35 @@ async function handleGraphError(res: Response): Promise<never> {
     body = 'Unable to read error body';
   }
   throw new Error(`Microsoft Graph error (${res.status}): ${body.slice(0, 300)}`);
+}
+
+/**
+ * E2E provider-response override hook. When `agencyId` is set and a matching
+ * `provider_response_overrides` row exists, synthesizes a Graph-style error
+ * (or returns a forced body) without touching Microsoft. Fail-closed: null on
+ * any resolver error, so the real fetch proceeds. Non-prod gated. See
+ * shared/lib/http/provider-override-resolver.ts.
+ */
+async function maybeApplyGraphOverride<T>(
+  url: string,
+  agencyId: string | undefined,
+): Promise<{ shortCircuit: true; result: T } | { shortCircuit: false }> {
+  if (!agencyId) return { shortCircuit: false };
+  const override = await resolveProviderOverride(agencyId, 'entra', url);
+  if (!override) return { shortCircuit: false };
+  await applyOverrideDelay(override);
+  if (override.status >= 400) {
+    const bodyStr =
+      override.body == null
+        ? `forced override ${override.status}`
+        : typeof override.body === 'string'
+          ? override.body
+          : JSON.stringify(override.body);
+    throw new Error(
+      `Microsoft Graph error (${override.status}): ${bodyStr.slice(0, 300)}`,
+    );
+  }
+  return { shortCircuit: true, result: (override.body ?? {}) as T };
 }
 
 // ---------------------------------------------------------------------------
@@ -66,11 +100,26 @@ interface ODataPage<T> {
 async function fetchAllPages<T>(
   accessToken: string,
   initialUrl: string,
+  agencyId?: string,
 ): Promise<T[]> {
   const results: T[] = [];
   let url: string | undefined = initialUrl;
 
   while (url) {
+    // E2E override hook — consulted per page so mid-sync forced failures
+    // land on the page they're tagged to. Fail-closed via resolver null.
+    const gate: { shortCircuit: true; result: ODataPage<T> } | { shortCircuit: false } =
+      await maybeApplyGraphOverride<ODataPage<T>>(url, agencyId);
+    if (gate.shortCircuit) {
+      // A forced success body stands in for a single page. If it carries
+      // its own @odata.nextLink the loop will continue, but normal E2E
+      // usage is to stub a terminal page or force a 4xx/5xx (throws above).
+      const forcedPage: ODataPage<T> = gate.result;
+      results.push(...(forcedPage.value ?? []));
+      url = forcedPage['@odata.nextLink'];
+      continue;
+    }
+
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
@@ -106,14 +155,17 @@ const USER_SELECT = [
  * GET /users — returns all Member-type users in the tenant.
  * Paginates automatically via @odata.nextLink.
  */
-export async function fetchUsers(accessToken: string): Promise<EntraUser[]> {
+export async function fetchUsers(
+  accessToken: string,
+  agencyId?: string,
+): Promise<EntraUser[]> {
   const params = new URLSearchParams({
     $filter: "userType eq 'Member'",
     $select: USER_SELECT,
     $top: '999',
   });
   const url = `${GRAPH_BASE}/users?${params.toString()}`;
-  return fetchAllPages<EntraUser>(accessToken, url);
+  return fetchAllPages<EntraUser>(accessToken, url, agencyId);
 }
 
 const GROUP_SELECT = [
@@ -130,13 +182,16 @@ const GROUP_SELECT = [
  * GET /groups — returns all groups in the tenant.
  * Paginates automatically via @odata.nextLink.
  */
-export async function fetchGroups(accessToken: string): Promise<EntraGroup[]> {
+export async function fetchGroups(
+  accessToken: string,
+  agencyId?: string,
+): Promise<EntraGroup[]> {
   const params = new URLSearchParams({
     $select: GROUP_SELECT,
     $top: '999',
   });
   const url = `${GRAPH_BASE}/groups?${params.toString()}`;
-  return fetchAllPages<EntraGroup>(accessToken, url);
+  return fetchAllPages<EntraGroup>(accessToken, url, agencyId);
 }
 
 // Raw member shape returned by Graph before filtering
@@ -157,10 +212,11 @@ interface RawMember {
 export async function fetchGroupMembers(
   accessToken: string,
   groupId: string,
+  agencyId?: string,
 ): Promise<EntraMember[]> {
   const params = new URLSearchParams({ $top: '999' });
   const url = `${GRAPH_BASE}/groups/${encodeURIComponent(groupId)}/members?${params.toString()}`;
-  const raw = await fetchAllPages<RawMember>(accessToken, url);
+  const raw = await fetchAllPages<RawMember>(accessToken, url, agencyId);
 
   return raw
     .filter((m) => m['@odata.type'] === '#microsoft.graph.user')

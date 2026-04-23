@@ -106,12 +106,16 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   const resolvedDisplayName = displayName || identity.name || resolvedEmail;
 
   try {
-    const result = await ensureUserInOu(accessToken, {
-      primaryEmail: resolvedEmail,
-      givenName: resolvedDisplayName.split(' ')[0] || 'PAM',
-      familyName: resolvedDisplayName.split(' ').slice(1).join(' ') || platformKey || 'Identity',
-      orgUnitPath: syntheticOrgUnitPath,
-    });
+    const result = await ensureUserInOu(
+      accessToken,
+      {
+        primaryEmail: resolvedEmail,
+        givenName: resolvedDisplayName.split(' ')[0] || 'PAM',
+        familyName: resolvedDisplayName.split(' ').slice(1).join(' ') || platformKey || 'Identity',
+        orgUnitPath: syntheticOrgUnitPath,
+      },
+      tenantId,
+    );
 
     // 6. Update provider status
     await updateProviderStatus(prisma, identityId, 'google-workspace', {

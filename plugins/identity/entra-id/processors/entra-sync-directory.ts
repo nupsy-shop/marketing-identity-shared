@@ -138,7 +138,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     // 3. Fetch and upsert users
     if (syncUsersEnabled) {
     const seenEmails = new Set<string>();
-    users = await fetchUsers(accessToken);
+    users = await fetchUsers(accessToken, tenantId);
 
     for (const user of users) {
       const email = (user.mail || user.userPrincipalName)?.toLowerCase();
@@ -210,7 +210,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     if (syncGroupsEnabled) {
     // 5. Fetch and upsert groups
     const seenGroupIds = new Set<string>(); // entra_group_id values seen this sync
-    const groups = await fetchGroups(accessToken);
+    const groups = await fetchGroups(accessToken, tenantId);
 
     for (const group of groups) {
       await upsertEntraGroup(sourceId, tenantId, group);
@@ -239,7 +239,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     });
 
     for (const dbGroup of activeGroups) {
-      const members = await fetchGroupMembers(accessToken, dbGroup.entra_group_id);
+      const members = await fetchGroupMembers(accessToken, dbGroup.entra_group_id, tenantId);
       const membershipChanges = await syncEntraMemberships(sourceId, dbGroup.id, tenantId, members);
       for (const entraUserId of membershipChanges.addedEntraUserIds) {
         if (!groupChangesByUser.has(entraUserId)) groupChangesByUser.set(entraUserId, { added: [], removed: [] });
