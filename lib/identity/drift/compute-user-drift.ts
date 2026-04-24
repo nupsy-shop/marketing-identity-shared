@@ -131,7 +131,15 @@ export async function computeUserDrift(
   // 7. Provider-user rows
   const rows: UserRow[] = providerUsers.map((u) => {
     const emailLc = u.email.toLowerCase();
-    const inJmlScope: boolean | null = !isJmlOwner
+    // Platform-owned sources (LD) bypass JML scope entirely — `mattersToApp`
+    // is forced true below regardless of scope membership, so the column
+    // should render "—" (null) even if a stale `jml_scope` row is present
+    // in DB (e.g. from an earlier UI config attempt). Without this guard,
+    // a stale empty-groups scope resolves to an empty Set and every LD
+    // user gets `inJmlScope: false` → the Users-tab pure-column filter
+    // then hides them by default ("7 users outside JML scope" on a source
+    // that has no scope concept).
+    const inJmlScope: boolean | null = isPlatformOwnedSource || !isJmlOwner
       ? null
       : scopedEmails === null
         ? true
