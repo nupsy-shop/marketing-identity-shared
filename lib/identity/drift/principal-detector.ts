@@ -252,7 +252,7 @@ export async function detectPrincipalDrift(
     const gate = evaluateSourceGates(
       {
         provisioningEnabled: src.provisioning_enabled ?? false,
-        connectionState: src.connection_state ?? 'connected',
+        connectionState: src.connection_state ?? 'disconnected',
         autoProvisionUsers: cfg.autoProvisionUsers as boolean | undefined,
       },
       e.driftType,
@@ -261,11 +261,10 @@ export async function detectPrincipalDrift(
     if (!gate.allow) {
       skipped[gate.reason] = (skipped[gate.reason] ?? 0) + 1;
       await publishAuditEvent({
-        eventType: 'remediation.skipped',
-        source: 'principal-detector',
-        severity: 'info',
-        agency: { id: agencyId },
-        actor: { id: 'system', type: 'system' },
+        type: 'remediation',
+        action: 'skipped',
+        actor: { id: 'system' },
+        agency_id: agencyId,
         context: {
           reason: gate.reason,
           sourcePluginKey: e.sourcePluginKey,
