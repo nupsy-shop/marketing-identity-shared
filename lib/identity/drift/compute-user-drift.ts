@@ -153,6 +153,20 @@ export async function computeUserDrift(
         details: `${u.email} is in JML scope but not in local directory`,
       };
     }
+    // Mirror row flipped to is_active=false means the user was not returned
+    // by the IdP on last sync (i.e., deleted). Surface this explicitly so the
+    // Users tab can distinguish "deleted in IdP" from generic inactivity and
+    // operators see it without needing the tooltip.
+    //
+    // Takes priority over `not_in_local_dir` because "deleted" is the more
+    // actionable root cause — once the row is deleted, the scope mismatch is
+    // a consequence, not the problem to solve.
+    if (mattersToApp && !u.isActive) {
+      drift = {
+        reason: 'deleted',
+        details: `${u.email} no longer exists in the Identity Source`,
+      };
+    }
 
     return {
       email: u.email,

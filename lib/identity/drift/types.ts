@@ -10,7 +10,8 @@ export type DriftReason =
   | 'missing'           // Identity email not in provider table
   | 'inactive'          // Identity email present but marked inactive
   | 'wrong_ou'          // GWS-only: wrong organizational unit
-  | 'deleted'           // Group no longer exists / is_active=false
+  | 'deleted'           // Group or user no longer exists in the IdP
+                        // (mirror row present with is_active=false)
   | 'renamed'           // Group display_name or email changed since binding
   | 'not_in_local_dir'  // User in JML scope but not in local users table
   | 'named_invite_unresolvable' // Named invite target doesn't exist in any IdP

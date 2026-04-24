@@ -198,16 +198,38 @@ export default async function gwsSyncDirectory(job: Bull.Job): Promise<JobResult
     // 5. Sync groups (paginated)
     let groupPageToken: string | undefined;
     const groupDbIds = new Map<string, string>(); // googleGroupId -> dbId
+    const seenGoogleGroupIds = new Set<string>();
 
     do {
       const page = await fetchGroups(accessToken, domain, groupPageToken);
       for (const group of page.groups ?? []) {
         const groupDbId = await upsertGwsGroup(prisma, sourceId, tenantId, group);
         groupDbIds.set(group.id, groupDbId);
+        seenGoogleGroupIds.add(group.id);
         stats.groupsUpserted++;
       }
       groupPageToken = page.nextPageToken;
     } while (groupPageToken);
+
+    // Deactivate groups not returned by Directory API — mirror the Entra
+    // processor's behaviour. Without this sweep, groups deleted in Google
+    // remain `is_active=true` forever in the mirror, so `computeGroupDrift`
+    // never emits `drift: 'deleted'` and the RBAC-drift block below becomes
+    // dead code (its `notIn: activeGwsGroupIds` filter never matches).
+    //
+    // Guard against empty pages: if Google returned zero groups (outage or
+    // transient failure) we must NOT mass-deactivate — `notIn: []` would
+    // deactivate every group.
+    if (seenGoogleGroupIds.size > 0) {
+      await prisma.gws_groups.updateMany({
+        where: {
+          source_id: sourceId,
+          google_group_id: { notIn: Array.from(seenGoogleGroupIds) },
+          is_active: true,
+        },
+        data: { is_active: false, updated_at: new Date() },
+      });
+    }
 
     // 6. Sync memberships for each group
     const groups = await prisma.gws_groups.findMany({
