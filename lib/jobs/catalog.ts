@@ -15,7 +15,7 @@
  *   automation      — cron-driven polling and chained automation.
  *                     Tenant-scoped; fans out per agency.
  *                     (entra_poll_audit, gws_poll_audit,
- *                     detect_drift, enforce_retention,
+ *                     detect_drift, detect_principal_drift, enforce_retention,
  *                     discover_assets, jml_process_lifecycle)
  *
  *   directory-sync  — directory state reconciliation from upstream IdPs.
@@ -79,6 +79,7 @@ export const JOB_CATALOG = {
   onelogin_poll_audit:        { queue: QUEUE_NAMES.AUTOMATION },
   jumpcloud_poll_audit:       { queue: QUEUE_NAMES.AUTOMATION },
   detect_drift:               { queue: QUEUE_NAMES.AUTOMATION },
+  detect_principal_drift:     { queue: QUEUE_NAMES.AUTOMATION },
   enforce_retention:          { queue: QUEUE_NAMES.AUTOMATION },
   discover_assets:            { queue: QUEUE_NAMES.AUTOMATION },
   jml_detect_lifecycle:       { queue: QUEUE_NAMES.AUTOMATION },
@@ -158,8 +159,9 @@ export const JOB_CATALOG = {
 
   // ─── System (no tenantId) ───────────────────────────────────────────
   dispatch_poll_audits:       { queue: QUEUE_NAMES.SYSTEM },
-  dispatch_detect_drift:      { queue: QUEUE_NAMES.SYSTEM },
-  dispatch_enforce_retention: { queue: QUEUE_NAMES.SYSTEM },
+  dispatch_detect_drift:              { queue: QUEUE_NAMES.SYSTEM },
+  dispatch_detect_principal_drift:    { queue: QUEUE_NAMES.SYSTEM },
+  dispatch_enforce_retention:         { queue: QUEUE_NAMES.SYSTEM },
   dispatch_discover_assets:   { queue: QUEUE_NAMES.SYSTEM },
   dispatch_sync_directories:      { queue: QUEUE_NAMES.SYSTEM },
   dispatch_autoremediation_eval:  { queue: QUEUE_NAMES.SYSTEM },
