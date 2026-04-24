@@ -9,8 +9,13 @@
 import { getRuntime } from '../../runtime.js';
 import type { Finder, ProducerFinding } from '../remediation-types.js';
 
+interface AccessItemRow {
+  id: string;
+  platformId: string | null;
+}
+
 export const expiredAccessFinder: Finder = async (agencyId) => {
-  const rows = await getRuntime().prisma.access_request_items.findMany({
+  const rows = (await getRuntime().prisma.access_request_items.findMany({
     where: {
       agency_id: agencyId,
       status: 'completed',
@@ -18,8 +23,8 @@ export const expiredAccessFinder: Finder = async (agencyId) => {
     },
     select: { id: true, platformId: true },
     take: 50,
-  });
-  return rows.map<ProducerFinding>((r) => ({
+  })) as AccessItemRow[];
+  return rows.map((r): ProducerFinding => ({
     context: { accessRequestItemIds: [r.id], platformKey: r.platformId || '' },
   }));
 };

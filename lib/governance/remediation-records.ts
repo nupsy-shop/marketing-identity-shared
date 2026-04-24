@@ -57,10 +57,10 @@ export async function captureBeforeState(
 ): Promise<Record<string, unknown>> {
   const beforeState: Record<string, unknown> = {};
   if (context.accessRequestItemIds?.length) {
-    const itemResult = await getRuntime().prisma.access_request_items.findMany({
+    const itemResult = (await getRuntime().prisma.access_request_items.findMany({
       where: { id: { in: context.accessRequestItemIds } },
       select: { id: true, status: true },
-    });
+    })) as Array<{ id: string; status: string }>;
     beforeState.accessRequestItemIds = itemResult.map((r) => r.id);
     beforeState.previousStatuses = itemResult.map((r) => r.status);
   }

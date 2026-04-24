@@ -15,6 +15,12 @@ import type {
 
 const DEFAULT_SUSPEND_AFTER_DAYS = 7;
 
+interface VerificationItemRow {
+  id: string;
+  platformId: string | null;
+  verification_status: string | null;
+}
+
 export const failedVerificationFinder: Finder = async (agencyId, policy) => {
   const suspendAfterDays =
     Number(
@@ -22,7 +28,7 @@ export const failedVerificationFinder: Finder = async (agencyId, policy) => {
         .suspendAfterDays,
     ) || DEFAULT_SUSPEND_AFTER_DAYS;
   const cutoff = new Date(Date.now() - suspendAfterDays * 24 * 60 * 60 * 1000);
-  const rows = await getRuntime().prisma.access_request_items.findMany({
+  const rows = (await getRuntime().prisma.access_request_items.findMany({
     where: {
       agency_id: agencyId,
       status: 'completed',
@@ -33,8 +39,8 @@ export const failedVerificationFinder: Finder = async (agencyId, policy) => {
     },
     select: { id: true, platformId: true, verification_status: true },
     take: 50,
-  });
-  return rows.map<ProducerFinding>((r) => ({
+  })) as VerificationItemRow[];
+  return rows.map((r): ProducerFinding => ({
     context: {
       accessRequestItemIds: [r.id],
       platformKey: r.platformId || '',

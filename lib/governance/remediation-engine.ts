@@ -79,7 +79,7 @@ export async function evaluateAndRemediate(
   }
 
   if (!VALID_TRIGGER_TYPES.includes(triggerType as TriggerType)) {
-    getRuntime().logger.warn(`[Remediation] Unknown trigger type: ${triggerType}`);
+    getRuntime().logger.warn('[Remediation] Unknown trigger type', { triggerType });
     return { action: 'invalid_trigger' };
   }
 

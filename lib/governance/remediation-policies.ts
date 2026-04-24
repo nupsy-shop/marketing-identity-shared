@@ -27,6 +27,9 @@ export async function loadPolicies(agencyId: string): Promise<RemediationPolicie
     where: { agency_id: agencyId },
     select: { remediation_policies: true },
   });
+  // `remediation_policies` is the canonical snake_case JSON column on
+  // agency_settings (not the camelCase-mapped field from the web-side
+  // settings mapper), so the shape cast is intentional and safe.
   return (row?.remediation_policies as unknown as RemediationPolicies) || {};
 }
 

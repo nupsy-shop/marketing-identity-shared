@@ -80,14 +80,14 @@ export async function computeUserRiskScores(agencyId: string): Promise<UserRisk[
   //    scoring, recommendations, and exports without UI-level guards.
   //    Per-client Security Owner / KAM are *not* excluded — only role-level
   //    owners are.
-  const userRows = await getRuntime().prisma.users.findMany({
+  const userRows = (await getRuntime().prisma.users.findMany({
     where: {
       agency_id: agencyId,
       is_active: true,
       NOT: { role: { in: [...RISK_EXCLUDED_ROLES] } },
     },
     select: { id: true, role: true, email: true, name: true },
-  });
+  })) as Array<{ id: string; role: string; email: string | null; name: string | null }>;
 
   if (userRows.length === 0) return [];
 
@@ -142,8 +142,19 @@ export async function computeUserRiskScores(agencyId: string): Promise<UserRisk[
   // Risk scoring only considers explicit client team assignments
   // (role assignments, ownership, derived roles).
 
+  interface AccessItem {
+    id: string;
+    role: string | null;
+    status: string;
+    createdAt: Date | null;
+    verification_status: string | null;
+    expiresAt: Date | null;
+    access_requests: { clientId: string };
+    catalog_platforms: { slug: string } | null;
+  }
+
   // 3. Get completed access request items (only completed = actual effective access)
-  const accessItems = await getRuntime().prisma.access_request_items.findMany({
+  const accessItems = (await getRuntime().prisma.access_request_items.findMany({
     where: { agency_id: agencyId, status: 'completed' },
     select: {
       id: true,
@@ -155,10 +166,10 @@ export async function computeUserRiskScores(agencyId: string): Promise<UserRisk[
       access_requests: { select: { clientId: true } },
       catalog_platforms: { select: { slug: true } },
     },
-  });
+  })) as AccessItem[];
 
   // Build client -> items map
-  const itemsByClient = new Map<string, typeof accessItems>();
+  const itemsByClient = new Map<string, AccessItem[]>();
   for (const item of accessItems) {
     const clientId = item.access_requests.clientId;
     if (!itemsByClient.has(clientId)) itemsByClient.set(clientId, []);
@@ -269,7 +280,7 @@ export async function computeUserRiskScores(agencyId: string): Promise<UserRisk[
     }
 
     // Factor: Inactivity (+5 per 30 days, max 25)
-    const lastActivity = userLastActivity.get(member.email);
+    const lastActivity = userLastActivity.get(member.email || '');
     const hasAccess = memberClientIds.size > 0;
     const inactiveDays = lastActivity ? daysSince(lastActivity) : (hasAccess ? 90 : 0);
     if (inactiveDays > 30) {
@@ -289,7 +300,7 @@ export async function computeUserRiskScores(agencyId: string): Promise<UserRisk[
     }
 
     // Factor: Drift detected (+15 per drift event)
-    const driftCount = driftCountByUser.get(member.email) || 0;
+    const driftCount = driftCountByUser.get(member.email || '') || 0;
     if (driftCount > 0) {
       const driftScore = driftCount * 15;
       score += driftScore;
@@ -306,8 +317,8 @@ export async function computeUserRiskScores(agencyId: string): Promise<UserRisk[
 
     results.push({
       userId: member.user_id,
-      email: member.email,
-      name: member.name || member.email,
+      email: member.email || '',
+      name: member.name || member.email || '',
       riskScore: clamp(score, 0, 100),
       factors,
       platforms: [...platforms],
