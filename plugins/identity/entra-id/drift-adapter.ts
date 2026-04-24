@@ -41,6 +41,26 @@ type EntraGroupRow = {
 type GroupMemberRow = { user_email: string };
 type DirectoryUserUpnRow = { email: string; user_principal_name: string | null };
 
+/**
+ * Entra's mirror currently conflates "admin disabled in Entra" with
+ * "absent from the Graph response" (both set `is_active=false` in upsert
+ * or sweep). Until the mirror is split into `is_present_in_idp` +
+ * `is_active` (PR B of the tri-state rollout), this adapter cannot tell
+ * the two apart. It deliberately never emits `'deleted'` — mis-labelling
+ * an admin-disabled account as deleted would trigger a Leaver workflow
+ * where today's behaviour produces a Suspend, so we preserve today's
+ * wrong-but-stable classification until PR B lands.
+ */
+function toDirectoryUser(r: DirectoryUserRow): DirectoryUser {
+  return {
+    email: r.email,
+    displayName: r.display_name,
+    department: r.department,
+    isActive: r.is_active,
+    status: r.is_active ? 'active' : 'suspended',
+  };
+}
+
 async function findDirectoryUsersByEmails(
   sourceId: string,
   agencyId: string,
@@ -56,12 +76,7 @@ async function findDirectoryUsersByEmails(
     },
     select: { email: true, display_name: true, department: true, is_active: true },
   });
-  return rows.map((r) => ({
-    email: r.email,
-    displayName: r.display_name,
-    department: r.department,
-    isActive: r.is_active,
-  }));
+  return rows.map(toDirectoryUser);
 }
 
 async function findAllDirectoryUsers(
@@ -73,12 +88,7 @@ async function findAllDirectoryUsers(
     where: { source_id: sourceId, agency_id: agencyId },
     select: { email: true, display_name: true, department: true, is_active: true },
   });
-  return rows.map((r) => ({
-    email: r.email,
-    displayName: r.display_name,
-    department: r.department,
-    isActive: r.is_active,
-  }));
+  return rows.map(toDirectoryUser);
 }
 
 async function findGroups(

@@ -153,15 +153,24 @@ export async function computeUserDrift(
         details: `${u.email} is in JML scope but not in local directory`,
       };
     }
-    // Mirror row flipped to is_active=false means the user was not returned
-    // by the IdP on last sync (i.e., deleted). Surface this explicitly so the
-    // Users tab can distinguish "deleted in IdP" from generic inactivity and
-    // operators see it without needing the tooltip.
+    // Mirror row indicates the user was not returned by the IdP on last
+    // sync (i.e., deleted). Surface this explicitly so the Users tab can
+    // distinguish "deleted in IdP" from generic inactivity and operators
+    // see it without needing the tooltip.
+    //
+    // Prefer the tri-state `status` when the adapter populates it; fall
+    // back to `!isActive` for legacy adapters (current state: all three
+    // adapters populate `status`, but Entra never emits 'deleted' until
+    // PR B migrates the mirror — so Entra continues to rely on the
+    // isActive fallback and will be upgraded transparently).
     //
     // Takes priority over `not_in_local_dir` because "deleted" is the more
-    // actionable root cause — once the row is deleted, the scope mismatch is
-    // a consequence, not the problem to solve.
-    if (mattersToApp && !u.isActive) {
+    // actionable root cause — once the row is deleted, the scope mismatch
+    // is a consequence, not the problem to solve.
+    const isDeletedInIdp = u.status !== undefined
+      ? u.status === 'deleted'
+      : !u.isActive;
+    if (mattersToApp && isDeletedInIdp) {
       drift = {
         reason: 'deleted',
         details: `${u.email} no longer exists in the Identity Source`,

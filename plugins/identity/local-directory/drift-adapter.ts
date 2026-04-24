@@ -58,13 +58,20 @@ type GroupMemberUserRow = {
 
 function toDirectoryUser(r: DirectoryUserRow): DirectoryUser {
   const keycloakLinked = !!r.keycloak_user_id;
+  const healthy = r.is_active && !r.is_suspended && keycloakLinked;
   return {
     email: r.email,
     displayName: r.display_name,
     department: r.department,
     // Local Directory "healthy" = active, not suspended, and linked to Keycloak.
     // See file-level doc.
-    isActive: r.is_active && !r.is_suspended && keycloakLinked,
+    isActive: healthy,
+    // LD is platform-owned — rows only disappear via hard delete, so the
+    // adapter never emits `'deleted'`. Suspension, admin-soft-delete, and
+    // "not yet provisioned in Keycloak" all collapse to `'suspended'` for
+    // JML purposes: none of those states should fire the Leaver workflow
+    // (the row isn't gone — it just can't currently log in).
+    status: healthy ? 'active' : 'suspended',
   };
 }
 

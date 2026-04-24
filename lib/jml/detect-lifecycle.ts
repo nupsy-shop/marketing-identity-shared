@@ -151,6 +151,19 @@ export async function detectLifecycle(
   for (const u of providerUsers) {
     const emailLc = u.email.toLowerCase();
     if (!inScope(emailLc)) continue;
+
+    // `status === 'deleted'` means the row lives in the mirror as a history
+    // receipt, but the IdP no longer returns the user. Skip the add so the
+    // leaver loop below treats this email as "not in provider" and fires a
+    // Leaver event when a local user still exists.
+    //
+    // Adapters that haven't populated `status` yet (or emit it without
+    // 'deleted' — currently Entra and LD) fall into the legacy path that
+    // keys on `isActive`. This preserves today's wrong-but-stable
+    // classification for those plugins until their per-adapter migrations
+    // land (see PR B follow-up).
+    if (u.status === 'deleted') continue;
+
     providerEmails.add(emailLc);
 
     const local = localByEmail.get(emailLc);
