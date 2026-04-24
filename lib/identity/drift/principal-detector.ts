@@ -170,6 +170,83 @@ export async function collectLocalDirectorySignals(
 }
 
 /**
+ * Collect `identity_missing` drift signals for HUMAN_INTERACTIVE identities
+ * on a given provider. An HI identity is unhealthy when its `identifier`
+ * (email) is absent from the cached directory table for that provider.
+ *
+ * Edge-case: if the directory cache is entirely empty for all sources of
+ * that plugin (sync has not run yet / new source), NO signals are emitted —
+ * not even healthy ones — to avoid flooding drift_findings with false
+ * positives during the initial sync window.
+ *
+ * Multiple sources of the same plugin are aggregated: the union of all cached
+ * emails across all sources is used. A non-empty cache in ANY source disables
+ * the empty-cache guard so we don't skip detection just because one of two
+ * sources is freshly added.
+ */
+export async function collectMissingHumanIdentitySignals(
+  agencyId: string,
+  providerKey: 'google-workspace' | 'entra-id',
+): Promise<PrincipalSignal[]> {
+  const { prisma } = getRuntime();
+
+  // 1. HI identities targeting this provider for this agency.
+  const identities = await prisma.integration_identities.findMany({
+    where: {
+      agency_id: agencyId,
+      isActive: true,
+      type: 'HUMAN_INTERACTIVE',
+      provisioning_targets: { has: providerKey },
+    },
+    select: { id: true, identifier: true },
+  });
+
+  if (identities.length === 0) return [];
+
+  // 2. Identity sources for this agency + plugin.
+  const sources = await prisma.identity_sources.findMany({
+    where: { agency_id: agencyId, plugin_key: providerKey },
+    select: { id: true },
+  });
+
+  if (sources.length === 0) return [];
+
+  const sourceIds = sources.map((s: { id: string }) => s.id);
+
+  // 3. Fetch cached directory emails for these sources.
+  type EmailRow = { email: string };
+  let cachedRows: EmailRow[] = [];
+  if (providerKey === 'google-workspace') {
+    cachedRows = await prisma.gws_directory_users.findMany({
+      where: { source_id: { in: sourceIds } },
+      select: { email: true },
+    });
+  } else {
+    cachedRows = await prisma.entra_directory_users.findMany({
+      where: { source_id: { in: sourceIds } },
+      select: { email: true },
+    });
+  }
+
+  // 4. Empty-cache guard: if no rows exist in ANY source, skip entirely.
+  //    We cannot distinguish "user is missing" from "sync has not run".
+  if (cachedRows.length === 0) return [];
+
+  const cachedEmails = new Set(cachedRows.map((r) => r.email.toLowerCase()));
+
+  // 5. Emit one signal per HI identity.
+  return identities.map((identity: { id: string; identifier: string }) => ({
+    sourcePluginKey: providerKey,
+    principalType: 'identity' as const,
+    principalId: identity.id,
+    driftType: 'identity_missing',
+    currentState: cachedEmails.has(identity.identifier.toLowerCase())
+      ? ('healthy' as const)
+      : ('unhealthy' as const),
+  }));
+}
+
+/**
  * Collect `provider_missing` drift signals for synthetic identities (service
  * accounts, shared inboxes/mailboxes, API keys, OAuth clients) on a given
  * provider. A synthetic identity is unhealthy when its per-provider status
@@ -224,6 +301,8 @@ export async function detectPrincipalDrift(
     ...(await collectLocalDirectorySignals(agencyId)),
     ...(await collectSyntheticIdentitySignals(agencyId, 'google-workspace')),
     ...(await collectSyntheticIdentitySignals(agencyId, 'entra-id')),
+    ...(await collectMissingHumanIdentitySignals(agencyId, 'google-workspace')),
+    ...(await collectMissingHumanIdentitySignals(agencyId, 'entra-id')),
   ];
   const emissions = await upsertAndDedupe(agencyId, signals);
 
