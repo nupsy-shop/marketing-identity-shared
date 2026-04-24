@@ -93,9 +93,33 @@ const TIERS: Record<string, TierFeatures> = Object.freeze({
 });
 
 /**
+ * Maximum connector plugin tier per subscription tier.
+ *
+ * Mirrors `TIER_DEFINITIONS[tier].maxPluginTier` from web's
+ * `lib/tier-policy.ts`. Single source of truth for the shared submodule.
+ *
+ * free=1, starter=1, growth=2, business=3, enterprise=3
+ */
+const MAX_PLUGIN_TIER: Record<string, number> = Object.freeze({
+  free: 1,
+  starter: 1,
+  growth: 2,
+  business: 3,
+  enterprise: 3,
+});
+
+/**
  * Return the per-tier feature-flag defaults. Unknown tier → 'free' (most
  * restrictive), matching web's fallback behaviour.
  */
 export function getFeaturesForTier(tier: string): TierFeatures {
   return TIERS[tier] ?? FREE;
+}
+
+/**
+ * Return the maximum connector plugin tier for a subscription tier.
+ * Unknown tier → 0 (most restrictive), so all connector flags default to false.
+ */
+export function getMaxPluginTierForTier(tier: string): number {
+  return MAX_PLUGIN_TIER[tier] ?? 0;
 }
