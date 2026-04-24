@@ -183,27 +183,32 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       stats.usersUpserted++;
     }
 
-    // 4. Mark users not returned by Graph as inactive.
+    // 4. Mark users not returned by Graph as absent from the IdP.
     // Leaver detection is the job of `jml_detect_lifecycle` which compares
     // the fresh mirror against `integration_identities`.
-    const allActiveUsers = await prisma.entra_directory_users.findMany({
-      where: { source_id: sourceId, is_active: true },
+    //
+    // Post-PR-B: the sweep flips `is_present_in_idp` (not `is_active`).
+    // `is_active` continues to reflect Graph's accountEnabled, so the
+    // disabled-vs-deleted distinction is finally preserved in the mirror.
+    // PR C then teaches the Entra drift adapter to read this column.
+    const allPresentUsers = await prisma.entra_directory_users.findMany({
+      where: { source_id: sourceId, is_present_in_idp: true },
       select: { email: true },
     });
 
-    const toDeactivateEmails: string[] = [];
-    for (const u of allActiveUsers) {
+    const toMarkAbsentEmails: string[] = [];
+    for (const u of allPresentUsers) {
       if (!seenEmails.has(u.email)) {
-        toDeactivateEmails.push(u.email);
+        toMarkAbsentEmails.push(u.email);
       }
     }
 
-    if (toDeactivateEmails.length > 0) {
+    if (toMarkAbsentEmails.length > 0) {
       await prisma.entra_directory_users.updateMany({
-        where: { source_id: sourceId, email: { in: toDeactivateEmails }, is_active: true },
-        data: { is_active: false, updated_at: new Date(), last_synced_at: new Date() },
+        where: { source_id: sourceId, email: { in: toMarkAbsentEmails }, is_present_in_idp: true },
+        data: { is_present_in_idp: false, updated_at: new Date(), last_synced_at: new Date() },
       });
-      stats.usersDeactivated = toDeactivateEmails.length;
+      stats.usersDeactivated = toMarkAbsentEmails.length;
     }
     } // end if (syncUsersEnabled)
 
@@ -388,6 +393,19 @@ async function upsertEntraDirectoryUser(
   const email = (user.mail || user.userPrincipalName)?.toLowerCase();
   if (!email) return;
 
+  // Tri-state DirectoryUser.status migration (PR B):
+  //   is_active          → reflects Graph's accountEnabled only (admin
+  //                        disable state). True when Graph returns the
+  //                        user with accountEnabled !== false.
+  //   is_present_in_idp  → whether Graph returned the user at all. Set
+  //                        true here on every upsert; set false by the
+  //                        not-seen sweep below.
+  //
+  // Pre-migration, both signals were collapsed into is_active. That
+  // prevented the Entra drift adapter from emitting status='deleted',
+  // which in turn forced jml_detect_lifecycle to bucket deletions as
+  // Suspend rather than Leaver. PR C will wire is_present_in_idp into
+  // the adapter; this PR just captures the split so data starts flowing.
   await prisma.entra_directory_users.upsert({
     where: { source_id_email: { source_id: sourceId, email } },
     update: {
@@ -397,6 +415,7 @@ async function upsertEntraDirectoryUser(
       job_title: user.jobTitle ?? null,
       department: user.department ?? null,
       is_active: user.accountEnabled !== false,
+      is_present_in_idp: true,
       entra_user_id: user.id,
       user_principal_name: user.userPrincipalName ?? null,
       raw_attributes: user as any,
@@ -412,6 +431,7 @@ async function upsertEntraDirectoryUser(
       job_title: user.jobTitle ?? null,
       department: user.department ?? null,
       is_active: user.accountEnabled !== false,
+      is_present_in_idp: true,
       entra_user_id: user.id,
       user_principal_name: user.userPrincipalName ?? null,
       raw_attributes: user as any,
