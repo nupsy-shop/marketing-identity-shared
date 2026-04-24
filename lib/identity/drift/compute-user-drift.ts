@@ -159,10 +159,15 @@ export async function computeUserDrift(
     // see it without needing the tooltip.
     //
     // Prefer the tri-state `status` when the adapter populates it; fall
-    // back to `!isActive` for legacy adapters (current state: all three
-    // adapters populate `status`, but Entra never emits 'deleted' until
-    // PR B migrates the mirror — so Entra continues to rely on the
-    // isActive fallback and will be upgraded transparently).
+    // back to `!isActive` for legacy adapters.
+    //
+    // "Deleted" is reported REGARDLESS of `mattersToApp`. A user's
+    // absence from the IdP is a fact about the provider, not the app's
+    // relationship with that user — an out-of-scope deleted row is still
+    // a deleted row, and surfacing that is what lets operators recognise
+    // ghost entries in the Users tab even when the JML scope is empty or
+    // misconfigured. The UI decides how loudly to render it; here we just
+    // don't withhold the classification.
     //
     // Takes priority over `not_in_local_dir` because "deleted" is the more
     // actionable root cause — once the row is deleted, the scope mismatch
@@ -170,7 +175,7 @@ export async function computeUserDrift(
     const isDeletedInIdp = u.status !== undefined
       ? u.status === 'deleted'
       : !u.isActive;
-    if (mattersToApp && isDeletedInIdp) {
+    if (isDeletedInIdp) {
       drift = {
         reason: 'deleted',
         details: `${u.email} no longer exists in the Identity Source`,
