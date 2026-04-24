@@ -28,6 +28,7 @@ type DirectoryUserRow = {
   display_name: string;
   department: string | null;
   is_active: boolean;
+  is_present_in_idp: boolean;
 };
 type EntraGroupRow = {
   id: string;
@@ -42,22 +43,27 @@ type GroupMemberRow = { user_email: string };
 type DirectoryUserUpnRow = { email: string; user_principal_name: string | null };
 
 /**
- * Entra's mirror currently conflates "admin disabled in Entra" with
- * "absent from the Graph response" (both set `is_active=false` in upsert
- * or sweep). Until the mirror is split into `is_present_in_idp` +
- * `is_active` (PR B of the tri-state rollout), this adapter cannot tell
- * the two apart. It deliberately never emits `'deleted'` — mis-labelling
- * an admin-disabled account as deleted would trigger a Leaver workflow
- * where today's behaviour produces a Suspend, so we preserve today's
- * wrong-but-stable classification until PR B lands.
+ * Post-migration (PR B split is_present_in_idp from is_active):
+ *
+ *   - is_present_in_idp=false → 'deleted'   (not returned by Graph)
+ *   - is_active=false         → 'suspended' (Graph returned accountEnabled=false)
+ *   - else                    → 'active'
+ *
+ * `isActive` keeps its pre-status semantic of `r.is_active` so legacy
+ * consumers that haven't adopted `status` see the same behaviour as
+ * before the tri-state rollout.
  */
 function toDirectoryUser(r: DirectoryUserRow): DirectoryUser {
+  const status: 'active' | 'suspended' | 'deleted' =
+    !r.is_present_in_idp ? 'deleted'
+    : !r.is_active ? 'suspended'
+    : 'active';
   return {
     email: r.email,
     displayName: r.display_name,
     department: r.department,
     isActive: r.is_active,
-    status: r.is_active ? 'active' : 'suspended',
+    status,
   };
 }
 
@@ -74,7 +80,7 @@ async function findDirectoryUsersByEmails(
       agency_id: agencyId,
       email: { in: emails, mode: 'insensitive' as const },
     },
-    select: { email: true, display_name: true, department: true, is_active: true },
+    select: { email: true, display_name: true, department: true, is_active: true, is_present_in_idp: true },
   });
   return rows.map(toDirectoryUser);
 }
@@ -86,7 +92,7 @@ async function findAllDirectoryUsers(
   const { prisma } = getRuntime();
   const rows: DirectoryUserRow[] = await prisma.entra_directory_users.findMany({
     where: { source_id: sourceId, agency_id: agencyId },
-    select: { email: true, display_name: true, department: true, is_active: true },
+    select: { email: true, display_name: true, department: true, is_active: true, is_present_in_idp: true },
   });
   return rows.map(toDirectoryUser);
 }
