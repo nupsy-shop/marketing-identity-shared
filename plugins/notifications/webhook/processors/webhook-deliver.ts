@@ -1,45 +1,112 @@
+/**
+ * Generic-Webhook Delivery Processor — `webhook_deliver` job.
+ *
+ * Consumes the dispatcher payload `{tenantId, channelId, eventType,
+ * context}` emitted by `shared/lib/notifications/dispatch.ts`. Loads the
+ * `notification_channels` row, renders the canonical JSON body via the
+ * shared webhook client, HMAC-signs with the channel's shared secret,
+ * and posts (or short-circuits via the E2E override hook).
+ *
+ * Pre-PR-H: the processor expected `{webhookUrl, event, payload, secret}`
+ * and threw "Missing required field: webhookUrl" for every real job.
+ * Same silent-retry-to-death pattern as the Slack processor had — see
+ * PR F for the broader rationale.
+ *
+ * Failure taxonomy:
+ *   - Config gaps (no row, inactive, no webhookUrl) → `skipped` (no retry).
+ *   - Remote 4xx → `failed` (non-retryable; operator fixes the endpoint).
+ *   - Remote 5xx / network / timeout → throws (Bull retries with backoff).
+ */
 import type Bull from 'bull';
-import crypto from 'crypto';
 import { getRuntime } from '../../../../lib/runtime.js';
+import { buildWebhookBody, postWebhook } from '../client.js';
 
 interface JobResult {
-  status: 'completed';
+  status: 'completed' | 'failed' | 'skipped';
   jobType: string;
+  reason?: string;
+  deliveryStatus?: number;
+}
+
+interface WebhookChannelConfig {
+  webhookUrl?: string;
+  secret?: string | null;
+}
+
+interface WebhookJobData {
+  tenantId: string;
+  channelId: string;
+  eventType: string;
+  context: Record<string, unknown>;
 }
 
 export default async function webhookDeliver(job: Bull.Job): Promise<JobResult> {
-  const { logger } = getRuntime();
-  const { tenantId, webhookUrl, event, payload, secret } = job.data;
+  const { prisma, logger } = getRuntime();
+  const { tenantId, channelId, eventType, context } = job.data as WebhookJobData;
 
-  if (!webhookUrl) {
-    throw new Error('Missing required field: webhookUrl');
+  if (!tenantId || !channelId || !eventType) {
+    logger.warn('webhook_deliver: missing required fields, skipping', {
+      jobId: String(job.id),
+      hasTenantId: !!tenantId,
+      hasChannelId: !!channelId,
+      hasEventType: !!eventType,
+    });
+    return {
+      status: 'skipped',
+      jobType: 'webhook_deliver',
+      reason: 'missing required fields (tenantId/channelId/eventType)',
+    };
   }
 
-  const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'User-Agent': 'AccessHive-Webhook/1.0',
-  };
-
-  // HMAC signature if secret provided
-  if (secret) {
-    const signature = crypto.createHmac('sha256', secret).update(body).digest('hex');
-    headers['X-Signature-256'] = `sha256=${signature}`;
+  const channel = await prisma.notification_channels.findFirst({
+    where: { id: channelId, agency_id: tenantId, is_active: true },
+    select: { id: true, name: true, config: true },
+  });
+  if (!channel) {
+    return {
+      status: 'skipped',
+      jobType: 'webhook_deliver',
+      reason: 'channel not found or inactive',
+    };
   }
 
-  const res = await fetch(webhookUrl, {
-    method: 'POST',
-    headers,
-    body,
-    signal: AbortSignal.timeout(30_000),
+  const config = ((channel.config ?? {}) as WebhookChannelConfig);
+  if (!config.webhookUrl) {
+    return {
+      status: 'skipped',
+      jobType: 'webhook_deliver',
+      reason: 'channel.config.webhookUrl is not set',
+    };
+  }
+
+  const body = buildWebhookBody(eventType, context);
+  const result = await postWebhook(tenantId, config.webhookUrl, body, config.secret ?? undefined);
+
+  if (result.ok) {
+    logger.info('webhook_deliver: delivered', {
+      jobId: String(job.id), tenantId, channelId, eventType, status: result.status,
+    });
+    return {
+      status: 'completed',
+      jobType: 'webhook_deliver',
+      deliveryStatus: result.status,
+    };
+  }
+
+  const isClientError = result.status >= 400 && result.status < 500;
+  logger.warn('webhook_deliver: delivery failed', {
+    jobId: String(job.id), tenantId, channelId, eventType,
+    status: result.status, error: result.error, willRetry: !isClientError,
   });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Webhook delivery failed (${res.status}): ${text.substring(0, 200)}`);
+  if (isClientError) {
+    return {
+      status: 'failed',
+      jobType: 'webhook_deliver',
+      reason: result.error ?? `Webhook returned ${result.status}`,
+      deliveryStatus: result.status,
+    };
   }
 
-  logger.info('Webhook delivered', { jobId: job.id, tenantId, webhookUrl, status: res.status });
-  return { status: 'completed', jobType: 'webhook_deliver' };
+  throw new Error(result.error ?? `Webhook transient failure (status=${result.status})`);
 }
