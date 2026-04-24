@@ -108,6 +108,24 @@ export interface IdentityDriftAdapter {
   readonly pluginKey: string;
 
   /**
+   * Keys under which this adapter's source records provisioning state in
+   * `integration_identities.provisioning_providers_status`. Defaults to
+   * `[pluginKey]`; override when the adapter identifies as one name but
+   * the provisioner writes under another.
+   *
+   * Concrete reason this exists: the Local Directory adapter identifies
+   * as `local-directory` but the provisioner that actually creates the
+   * user record writes under `keycloak`. Without the override, the
+   * Identities-tab resolver's provider-status filter would exclude every
+   * HUMAN_INTERACTIVE identity from the Local Directory view (bug
+   * observed on trevox, shipped as PR J in a hardcoded resolver-side
+   * alias map — PR K promoted it here so future plugins with split
+   * adapter-vs-provisioner names can declare their own aliases without
+   * editing the resolver).
+   */
+  readonly provisioningKeys?: readonly string[];
+
+  /**
    * When `true`, the orchestrator treats every directory user as
    * `mattersToApp: true` regardless of JML scope / named-invite rules.
    *

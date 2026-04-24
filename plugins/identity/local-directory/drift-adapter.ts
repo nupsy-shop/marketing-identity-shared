@@ -193,6 +193,13 @@ function describeFederatedSpace(_cfg: ConnectionConfigShape): FederatedSpaceDesc
 
 export const localDirectoryDriftAdapter: IdentityDriftAdapter = {
   pluginKey: 'local-directory',
+  // The provisioner that actually creates the user record writes under
+  // `integration_identities.provisioning_providers_status.keycloak`
+  // (Keycloak is the backend). Without aliasing this here, the
+  // Identities-tab resolver's `source.plugin_key in providers` check
+  // would never match and every HUMAN_INTERACTIVE identity would be
+  // hidden from the Local Directory view (bug observed on trevox).
+  provisioningKeys: ['local-directory', 'keycloak'],
   // LD IS the platform's internal principal registry — every row is a
   // platform-owned user by definition. The GWS/Entra "Out of Scope" bucket
   // doesn't translate here, so every LD directory user matters to the app.
