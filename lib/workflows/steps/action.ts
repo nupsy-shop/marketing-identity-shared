@@ -100,19 +100,16 @@ const actionHandlers: Record<string, ActionHandler> = {
       revocation.revoked = itemIds.length;
       revocation.itemIds = itemIds;
     } else if (userId || userEmail) {
-      // Lazy import — revocation-engine has a dep chain we don't want to pull
-      // into every workflow action load.
-      const mod = await import('@/lib/jml/revocation-engine').catch(() => null);
-      const revokeAllPlatformAccess = mod?.revokeAllPlatformAccess;
+      const { revokeAllPlatformAccess } = getRuntime();
       if (!revokeAllPlatformAccess) {
         revocation.note = 'revocation-engine not available on this runtime';
       } else {
-        const out = (await revokeAllPlatformAccess(
+        const out = await revokeAllPlatformAccess(
           instance.agency_id,
           userId || '',
           triggerType,
           userEmail,
-        )) as Record<string, unknown>;
+        );
         Object.assign(revocation, out);
       }
     } else {
@@ -236,25 +233,17 @@ const actionHandlers: Record<string, ActionHandler> = {
       errors: [] as string[],
     };
     try {
-      const mod = await import('@/lib/jml/revocation-engine').catch(() => null);
-      const reprovisionFn =
-        mod && typeof (mod as Record<string, unknown>).reprovisionAccess === 'function'
-          ? ((mod as Record<string, unknown>).reprovisionAccess as (
-              agencyId: string,
-              userId: string,
-              reason: string,
-            ) => Promise<{ reprovisioned?: number } | undefined>)
-          : null;
+      const { reprovisionAccess } = getRuntime();
       const userId = remediation.target_user_id;
-      if (reprovisionFn && userId) {
+      if (reprovisionAccess && userId) {
         reprovision.attempted = true;
-        const out = await reprovisionFn(
+        const out = await reprovisionAccess(
           instance.agency_id,
           userId,
           `revert:${remediation.trigger_type}`,
         );
         reprovision.reprovisioned = out?.reprovisioned || 0;
-      } else if (!reprovisionFn) {
+      } else if (!reprovisionAccess) {
         reprovision.note = 'Platform re-provisioning not yet wired — records restored only';
       } else {
         reprovision.note = 'No target user — records restored only';
