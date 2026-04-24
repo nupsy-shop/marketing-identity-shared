@@ -60,11 +60,27 @@ export async function computeUserDrift(
     : new Set();
 
   // 3. Local users (agency-wide)
+  //
+  // `is_active=false` on the platform `users` row means the user is
+  // admin-disabled in the app. That's a terminal, intentional state: a
+  // disabled user is not expected to have a working Keycloak identity or a
+  // live GWS/Entra account. Missing/suspended upstream is the desired
+  // shape, not drift. We build a `disabledEmails` set here and overlay
+  // `status='disabled'` when building UserRow below, uniformly for every
+  // adapter (LD/GWS/Entra) without each one needing to know about the
+  // `users` table.
   const localUsers = await prisma.users.findMany({
     where: { agency_id: agencyId },
-    select: { email: true },
+    select: { email: true, is_active: true },
   });
-  const localEmails = new Set(localUsers.map((u: { email: string }) => u.email.toLowerCase()));
+  const localEmails = new Set(
+    localUsers.map((u: { email: string }) => u.email.toLowerCase()),
+  );
+  const disabledEmails = new Set(
+    localUsers
+      .filter((u: { is_active: boolean | null }) => u.is_active === false)
+      .map((u: { email: string }) => u.email.toLowerCase()),
+  );
 
   // 4. Open named invites
   const namedInvites = await prisma.access_request_items.findMany({
@@ -190,11 +206,29 @@ export async function computeUserDrift(
       };
     }
 
+    // App-side overlay: if the platform `users` row is disabled, this
+    // user's provider-side state is don't-care. Wipe any drift we just
+    // computed — a disabled user missing from Keycloak / GWS / Entra is
+    // the intended shape, not drift to remediate. The Users tab reads
+    // `status === 'disabled'` to render a neutral "Disabled" pill instead
+    // of "In Drift". Takes precedence over `deleted` because once a user
+    // is disabled in the app, surfacing them as a red ghost confuses
+    // operators (they asked for this outcome).
+    const isAppDisabled = disabledEmails.has(emailLc);
+    const effectiveStatus: 'active' | 'suspended' | 'deleted' | 'disabled' | undefined =
+      isAppDisabled ? 'disabled' : u.status;
+    if (isAppDisabled) {
+      drift = null;
+    }
+
     return {
       email: u.email,
       displayName: u.displayName,
       department: u.department,
-      isActive: u.isActive,
+      // `isActive` follows the UI-relevant truth: a disabled user is
+      // "not active" even if the IdP still has them enabled.
+      isActive: isAppDisabled ? false : u.isActive,
+      status: effectiveStatus,
       inJmlScope,
       existsLocally,
       namedInvites: userInvites,

@@ -26,6 +26,16 @@ import type { JmlScopeShape, ConnectionConfigShape } from '../../../lib/identity
  *   - `deleted`   — absent from the last IdP sync response (the mirror
  *                   retains the row so provisioning-history is preserved,
  *                   but the principal is gone upstream)
+ *   - `disabled`  — app-side terminal state: the user's row in the
+ *                   platform `users` table has `is_active=false`. This is
+ *                   NOT drift: a disabled user is not expected to have a
+ *                   working IdP/Keycloak identity, so absence/suspension
+ *                   upstream is intentional. Emitted by the drift resolver
+ *                   (compute-user-drift) as a cross-cutting overlay on top
+ *                   of whatever the adapter reports, so it applies
+ *                   uniformly to LD / GWS / Entra without per-adapter
+ *                   plumbing. Renders as a neutral "Disabled" pill in
+ *                   the Users tab.
  *
  * Consumers (computeUserDrift, jml_detect_lifecycle) need the distinction
  * so "suspended" triggers the Suspend policy and "deleted" triggers the
@@ -45,7 +55,7 @@ import type { JmlScopeShape, ConnectionConfigShape } from '../../../lib/identity
  *     This preserves today's wrong-but-stable behavior without regressing
  *     existing installs.
  */
-export type DirectoryUserStatus = 'active' | 'suspended' | 'deleted';
+export type DirectoryUserStatus = 'active' | 'suspended' | 'deleted' | 'disabled';
 
 export interface DirectoryUser {
   email: string;
