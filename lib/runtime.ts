@@ -82,6 +82,10 @@ export function setRuntime(services: RuntimeServices): void {
   (globalThis as any)[RUNTIME_KEY] = services;
 }
 
+export function clearRuntime(): void {
+  (globalThis as Record<PropertyKey, unknown>)[RUNTIME_KEY] = undefined;
+}
+
 export function getRuntime(): RuntimeServices {
   const runtime = (globalThis as any)[RUNTIME_KEY] as RuntimeServices | undefined;
   if (!runtime) {
