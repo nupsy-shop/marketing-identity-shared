@@ -57,6 +57,15 @@ export interface UserRow {
   department: string | null;
   isActive: boolean;
   /**
+   * Provider-side tri-state with an app-side overlay. See
+   * {@link ../../../plugins/identity/common/drift-adapter.interface.DirectoryUserStatus}.
+   * Optional for back-compat; UI consumers fall back to `isActive` when
+   * undefined. `'disabled'` is emitted when the platform `users` row for
+   * this email has `is_active=false` — a terminal, intentional state that
+   * should render as "Disabled" rather than "In Drift".
+   */
+  status?: 'active' | 'suspended' | 'deleted' | 'disabled';
+  /**
    * JML-scope membership for this user.
    *   null  → JML is not configured / this source is not the JML owner
    *   true  → configured and in scope
