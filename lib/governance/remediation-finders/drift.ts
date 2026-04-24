@@ -16,8 +16,16 @@
 import { getRuntime } from '../../runtime.js';
 import type { Finder, ProducerFinding } from '../remediation-types.js';
 
+interface DriftFindingRow {
+  id: string;
+  source_plugin_key: string;
+  principal_type: string;
+  principal_id: string;
+  drift_type: string;
+}
+
 export const driftFinder: Finder = async (agencyId, policy) => {
-  const rows = await getRuntime().prisma.drift_findings.findMany({
+  const rows = (await getRuntime().prisma.drift_findings.findMany({
     where: {
       agency_id: agencyId,
       state: 'unhealthy',
@@ -31,7 +39,7 @@ export const driftFinder: Finder = async (agencyId, policy) => {
       drift_type: true,
     },
     take: 200,
-  });
+  })) as DriftFindingRow[];
 
   const excludePlatforms = new Set(policy?.excludePlatforms ?? []);
   const excludeUsers = new Set(policy?.excludeUsers ?? []);
@@ -39,7 +47,7 @@ export const driftFinder: Finder = async (agencyId, policy) => {
   return rows
     .filter((r) => !excludePlatforms.has(r.source_plugin_key))
     .filter((r) => !excludeUsers.has(r.principal_id))
-    .map<ProducerFinding>((r) => ({
+    .map((r): ProducerFinding => ({
       context: {
         driftFindingId: r.id,
         sourcePluginKey: r.source_plugin_key,

@@ -85,12 +85,22 @@ export async function listEvaluationRuns(
   agencyId: string,
   limit = 20,
 ): Promise<EvaluationRunRow[]> {
-  const rows = await getRuntime().prisma.remediation_evaluations.findMany({
+  interface EvalRow {
+    id: string;
+    agency_id: string;
+    started_at: Date;
+    finished_at: Date | null;
+    trigger_counts: Record<string, unknown> | null;
+    status: string;
+    error: string | null;
+    source: string;
+  }
+  const rows = (await getRuntime().prisma.remediation_evaluations.findMany({
     where: { agency_id: agencyId },
     orderBy: { started_at: 'desc' },
     take: limit,
-  });
-  return rows.map((r) => ({
+  })) as EvalRow[];
+  return rows.map((r): EvaluationRunRow => ({
     id: r.id,
     agencyId: r.agency_id,
     startedAt: r.started_at,

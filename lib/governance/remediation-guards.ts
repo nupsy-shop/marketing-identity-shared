@@ -43,7 +43,7 @@ export function incrementRateLimit(agencyId: string): void {
   incrementActionCount(agencyId).catch((err) =>
     getRuntime().logger.warn(
       '[Remediation] rate-limit increment failed:',
-      err instanceof Error ? err.message : String(err),
+      { message: err instanceof Error ? err.message : String(err) },
     ),
   );
 }

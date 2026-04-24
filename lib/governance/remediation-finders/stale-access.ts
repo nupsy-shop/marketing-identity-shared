@@ -15,17 +15,22 @@ import type {
 
 const DEFAULT_STALE_DAYS = 90;
 
+interface StaleAccessRow {
+  id: string;
+  platformId: string | null;
+}
+
 export const staleAccessFinder: Finder = async (agencyId, policy) => {
   const staleDays =
     Number((policy as RemediationPolicy & { staleDays?: number }).staleDays) ||
     DEFAULT_STALE_DAYS;
   const cutoff = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000);
-  const rows = await getRuntime().prisma.access_request_items.findMany({
+  const rows = (await getRuntime().prisma.access_request_items.findMany({
     where: { agency_id: agencyId, status: 'completed', updatedAt: { lt: cutoff } },
     select: { id: true, platformId: true },
     take: 50,
-  });
-  return rows.map<ProducerFinding>((r) => ({
+  })) as StaleAccessRow[];
+  return rows.map((r): ProducerFinding => ({
     context: {
       accessRequestItemIds: [r.id],
       platformKey: r.platformId || '',
