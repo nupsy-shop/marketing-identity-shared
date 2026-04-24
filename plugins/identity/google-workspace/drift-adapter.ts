@@ -27,7 +27,22 @@ type DirectoryUserRow = {
   display_name: string;
   department: string | null;
   is_active: boolean;
+  is_suspended: boolean;
 };
+
+/**
+ * Derive {@link DirectoryUserStatus} from the two GWS mirror columns.
+ *
+ *   - is_active=false (set by gws_sync_directory when Google didn't return
+ *     the user in this pass) → deleted.
+ *   - is_suspended=true → suspended (Google Admin suspended the account).
+ *   - else → active.
+ */
+function gwsUserStatus(r: { is_active: boolean; is_suspended: boolean }): 'active' | 'suspended' | 'deleted' {
+  if (!r.is_active) return 'deleted';
+  if (r.is_suspended) return 'suspended';
+  return 'active';
+}
 type GwsGroupRow = {
   id: string;
   google_group_id: string;
@@ -40,6 +55,21 @@ type GwsGroupRow = {
 type DirectoryUserEmailRow = { email: string };
 type DirectoryUserOuRow = { email: string; org_unit_path: string | null };
 type GroupMemberRow = { user_email: string };
+
+function toDirectoryUser(r: DirectoryUserRow): DirectoryUser {
+  return {
+    email: r.email,
+    displayName: r.display_name,
+    department: r.department,
+    // `isActive` keeps its pre-`status` semantic of "row present in mirror
+    // with is_active=true" so existing consumers that haven't migrated to
+    // `status` see no behavior change. The richer tri-state is exposed via
+    // `status` and adopted opt-in by callers that need Suspend vs Leaver
+    // disambiguation.
+    isActive: r.is_active,
+    status: gwsUserStatus(r),
+  };
+}
 
 async function findDirectoryUsersByEmails(
   sourceId: string,
@@ -54,14 +84,9 @@ async function findDirectoryUsersByEmails(
       agency_id: agencyId,
       email: { in: emails, mode: 'insensitive' as const },
     },
-    select: { email: true, display_name: true, department: true, is_active: true },
+    select: { email: true, display_name: true, department: true, is_active: true, is_suspended: true },
   });
-  return rows.map((r) => ({
-    email: r.email,
-    displayName: r.display_name,
-    department: r.department,
-    isActive: r.is_active,
-  }));
+  return rows.map(toDirectoryUser);
 }
 
 async function findAllDirectoryUsers(
@@ -71,14 +96,9 @@ async function findAllDirectoryUsers(
   const { prisma } = getRuntime();
   const rows: DirectoryUserRow[] = await prisma.gws_directory_users.findMany({
     where: { source_id: sourceId, agency_id: agencyId },
-    select: { email: true, display_name: true, department: true, is_active: true },
+    select: { email: true, display_name: true, department: true, is_active: true, is_suspended: true },
   });
-  return rows.map((r) => ({
-    email: r.email,
-    displayName: r.display_name,
-    department: r.department,
-    isActive: r.is_active,
-  }));
+  return rows.map(toDirectoryUser);
 }
 
 async function findGroups(

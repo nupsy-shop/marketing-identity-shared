@@ -16,11 +16,53 @@
 
 import type { JmlScopeShape, ConnectionConfigShape } from '../../../lib/identity/drift/types.js';
 
+/**
+ * Tri-state of a provider-side directory user. Replaces the overloaded
+ * boolean `isActive`, which smashed these three distinct real-world states
+ * into two values:
+ *
+ *   - `active`    — present in IdP and enabled (login works)
+ *   - `suspended` — present in IdP but admin-disabled or otherwise blocked
+ *   - `deleted`   — absent from the last IdP sync response (the mirror
+ *                   retains the row so provisioning-history is preserved,
+ *                   but the principal is gone upstream)
+ *
+ * Consumers (computeUserDrift, jml_detect_lifecycle) need the distinction
+ * so "suspended" triggers the Suspend policy and "deleted" triggers the
+ * Leaver policy. `isActive` kept for backward-compat during rollout; new
+ * code should prefer `status`.
+ *
+ * Per-adapter semantics:
+ *   - GWS: mirror already splits signals — `deleted` iff row's is_active=false
+ *     (set by the not-seen sweep), else `suspended` iff is_suspended=true,
+ *     else `active`.
+ *   - LD:  platform-owned — rows only disappear via hard delete, so the
+ *     adapter never emits `deleted`. `suspended` covers is_suspended OR
+ *     unprovisioned (keycloak_user_id null) OR soft-inactive.
+ *   - Entra: mirror currently conflates deleted with admin-disabled (see
+ *     PR B follow-up). Until that migration lands, Entra's adapter never
+ *     emits `deleted` — disabled and deleted both render as `suspended`.
+ *     This preserves today's wrong-but-stable behavior without regressing
+ *     existing installs.
+ */
+export type DirectoryUserStatus = 'active' | 'suspended' | 'deleted';
+
 export interface DirectoryUser {
   email: string;
   displayName: string;
   department: string | null;
+  /**
+   * @deprecated Prefer `status`. Derived as `status === 'active'` for
+   * adapters that populate `status`. Kept so legacy consumers continue to
+   * compile during the rollout of PRs A/B/C.
+   */
   isActive: boolean;
+  /**
+   * Tri-state presence/enablement. See {@link DirectoryUserStatus}.
+   * Optional during rollout — consumers fall back to `isActive` when
+   * undefined.
+   */
+  status?: DirectoryUserStatus;
 }
 
 export interface ProviderGroup {
