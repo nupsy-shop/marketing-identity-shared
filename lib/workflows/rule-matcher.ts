@@ -91,21 +91,44 @@ export async function matchWorkflow(
 }
 
 /**
- * Default drift-template mapping (issues #90, #89). Matches the autonomy
- * matrix: Local Directory → link-keycloak-identity; GW/Entra synthetic →
- * recreate-*-synthetic-identity. Users on GW/Entra are filtered by the
- * autonomy matrix before we're called (JML owns them).
+ * Default drift-template mapping (issues #90, #89, identity_missing).
+ * Matches the autonomy matrix:
+ *   - Local Directory + identity              → link-keycloak-identity
+ *   - GW/Entra + synthetic_identity           → recreate-*-synthetic-identity
+ *   - GW/Entra + identity + identity_missing  → flag-missing-*-identity
+ *
+ * Users on GW/Entra are filtered by the autonomy matrix before we're called
+ * (JML owns them).
  */
 function resolveDriftTemplateKey(context: Record<string, unknown>): string | null {
   const pluginKey = context.sourcePluginKey as string | undefined;
   const principalType = context.principalType as string | undefined;
+  const driftType = context.driftType as string | undefined;
+
   if (pluginKey === 'local-directory') return 'drift-link-keycloak-identity';
+
   if (pluginKey === 'google-workspace' && principalType === 'synthetic_identity') {
     return 'drift-recreate-gws-synthetic-identity';
   }
   if (pluginKey === 'entra-id' && principalType === 'synthetic_identity') {
     return 'drift-recreate-entra-synthetic-identity';
   }
+
+  if (
+    pluginKey === 'google-workspace' &&
+    principalType === 'identity' &&
+    driftType === 'identity_missing'
+  ) {
+    return 'drift-flag-missing-gws-identity';
+  }
+  if (
+    pluginKey === 'entra-id' &&
+    principalType === 'identity' &&
+    driftType === 'identity_missing'
+  ) {
+    return 'drift-flag-missing-entra-identity';
+  }
+
   return null;
 }
 
