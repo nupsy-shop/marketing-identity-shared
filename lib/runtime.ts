@@ -71,6 +71,33 @@ export interface RuntimeServices {
     provider: string,
     url: string,
   ) => Promise<{ status: number; body: unknown; delayMs?: number } | null>;
+  /**
+   * Optional revocation engine, registered by the host. Used by the
+   * workflow engine's `revoke_access` action. When undefined (e.g. in the
+   * Bull worker, where webpack's require.context-based plugin loader is
+   * not available), `revoke_access` actions will fail loudly rather than
+   * silently no-op — callers can then route to a manual remediation task.
+   *
+   * Signature mirrors lib/jml/revocation-engine.revokeAllPlatformAccess.
+   */
+  revokeAllPlatformAccess?: (
+    agencyId: string,
+    directoryUserId: string,
+    reason: string,
+    userEmail?: string,
+  ) => Promise<Record<string, unknown>>;
+
+  /**
+   * Optional reprovision engine, registered by the host. Used by the
+   * workflow engine's `restore_before_state` action to re-grant access
+   * that was previously revoked by automation. See `revokeAllPlatformAccess`
+   * for runtime availability semantics.
+   */
+  reprovisionAccess?: (
+    agencyId: string,
+    userId: string,
+    reason: string,
+  ) => Promise<{ reprovisioned?: number } | undefined>;
 }
 
 // Use globalThis to ensure a single instance across compiled modules.
