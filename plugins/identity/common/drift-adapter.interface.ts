@@ -65,6 +65,21 @@ export interface FederatedSpaceDescriptor {
 export interface IdentityDriftAdapter {
   readonly pluginKey: string;
 
+  /**
+   * When `true`, the orchestrator treats every directory user as
+   * `mattersToApp: true` regardless of JML scope / named-invite rules.
+   *
+   * Meant for first-party sources whose directory IS the platform's
+   * principal registry (e.g. Local Directory / Keycloak). The
+   * GWS/Entra "JML scope or named invite or else Out of Scope" semantic
+   * is designed for *external* directories that may contain people who
+   * are not platform-relevant principals; that framing doesn't apply to
+   * a source the platform fully owns.
+   *
+   * Default: `false` / undefined. Non-platform-owned adapters omit this.
+   */
+  readonly isPlatformOwnedSource?: boolean;
+
   // ── Directory users ──────────────────────────────────────────────────
   /**
    * Lookup directory users by exact email list (case-insensitive).

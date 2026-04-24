@@ -186,6 +186,10 @@ function describeFederatedSpace(_cfg: ConnectionConfigShape): FederatedSpaceDesc
 
 export const localDirectoryDriftAdapter: IdentityDriftAdapter = {
   pluginKey: 'local-directory',
+  // LD IS the platform's internal principal registry — every row is a
+  // platform-owned user by definition. The GWS/Entra "Out of Scope" bucket
+  // doesn't translate here, so every LD directory user matters to the app.
+  isPlatformOwnedSource: true,
   findDirectoryUsersByEmails,
   findAllDirectoryUsers,
   findGroups,

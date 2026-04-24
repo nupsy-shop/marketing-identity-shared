@@ -46,6 +46,10 @@ export async function computeUserDrift(
   const adapter = getDriftAdapter(source.plugin_key);
   const jmlScope = (source.jml_scope as JmlScopeShape) ?? null;
   const isJmlOwner = jmlScope !== null;
+  // Platform-owned sources (currently only Local Directory) bypass the
+  // JML-scope / named-invite "matters to app" rule because every one of
+  // their directory users IS by definition a platform-relevant principal.
+  const isPlatformOwnedSource = adapter.isPlatformOwnedSource === true;
 
   // 1. Provider users via adapter
   const providerUsers = await adapter.findAllDirectoryUsers(sourceId, agencyId);
@@ -137,7 +141,10 @@ export async function computeUserDrift(
     invitesByEmail.delete(emailLc);
 
     const namedInviteMatch = userInvites.length > 0;
-    const mattersToApp = (isJmlOwner && inJmlScope === true) || namedInviteMatch;
+    const mattersToApp =
+      isPlatformOwnedSource ||
+      (isJmlOwner && inJmlScope === true) ||
+      namedInviteMatch;
 
     let drift: Drift | null = null;
     if (isJmlOwner && inJmlScope === true && !existsLocally) {
