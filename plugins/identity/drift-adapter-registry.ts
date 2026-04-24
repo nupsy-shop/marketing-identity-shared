@@ -16,6 +16,7 @@
 import type { IdentityDriftAdapter } from './common/drift-adapter.interface.js';
 import { gwsDriftAdapter } from './google-workspace/drift-adapter.js';
 import { entraDriftAdapter } from './entra-id/drift-adapter.js';
+import { localDirectoryDriftAdapter } from './local-directory/drift-adapter.js';
 
 export class UnsupportedPluginError extends Error {
   constructor(pluginKey: string) {
@@ -27,6 +28,7 @@ export class UnsupportedPluginError extends Error {
 const adapters = new Map<string, IdentityDriftAdapter>([
   ['google-workspace', gwsDriftAdapter],
   ['entra-id', entraDriftAdapter],
+  ['local-directory', localDirectoryDriftAdapter],
 ]);
 
 export function getDriftAdapter(pluginKey: string): IdentityDriftAdapter {
