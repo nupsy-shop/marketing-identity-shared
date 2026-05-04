@@ -143,20 +143,28 @@ function buildQuery(filters: AuditQueryOptions): EsQuery {
 // ─── Index range computation ─────────────────────────────────────────────────
 
 function computeIndices(dateFrom?: string | Date | null, dateTo?: string | Date | null): string {
-  if (!dateFrom && !dateTo) return allIndicesPattern();
-
-  const start = dateFrom ? new Date(dateFrom) : new Date(Date.now() - 365 * 86400000);
-  const end = dateTo ? new Date(dateTo) : new Date();
-
-  const indices = new Set<string>();
-  const cursor = new Date(start);
-  while (cursor <= end) {
-    indices.add(indexNameForDate(cursor));
-    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
-  }
-  indices.add(indexNameForDate(end));
-
-  return [...indices].join(',');
+  // Always use the wildcard pattern. The query body's timestamp range filter
+  // (see buildQuery) already restricts results to the date window; the
+  // `audit-*` wildcard lets ES do index-level metadata pruning automatically
+  // (each monthly index has min/max timestamp metadata — non-overlapping
+  // indices are skipped at query time).
+  //
+  // Why we no longer enumerate per-month indices in the URL:
+  //   - For agencies with multi-year retention (Enterprise: 2555 days), the
+  //     clamp can set `dateFrom` ~7 years ago. Enumerating 80+ monthly
+  //     indices into a comma-separated URL slug pushed the request URL over
+  //     the Searchbox proxy's 1KB URL limit, returning 414 Request-URI Too
+  //     Large. The proxy 414 surfaces as a 500 with empty body to the
+  //     caller (because it preempts the route's structured serverError
+  //     envelope path).
+  //   - The wildcard is no slower in practice — ES caches resolved index
+  //     lists per node and prunes by index-level timestamp metadata.
+  //
+  // Args kept for ABI compatibility / future re-introduction; intentionally
+  // unused.
+  void dateFrom;
+  void dateTo;
+  return allIndicesPattern();
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
