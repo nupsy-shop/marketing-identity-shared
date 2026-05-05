@@ -13,10 +13,15 @@
  * strictly safer than unbounded execution.
  */
 
-import type { Redis as RedisType } from 'ioredis';
+// Use the NAMED `Redis` export from ioredis (the constructor class), not
+// the default export. Under NodeNext module resolution, ioredis's CJS
+// shape exposes the constructor as a NAMED export; `import IORedis from
+// 'ioredis'` returns the module namespace (which is not constructable).
+// `RedisType` (also re-aliased from `Redis`) is the connection-instance
+// type for the field annotation.
+import { Redis as IORedis, type Redis as RedisType } from 'ioredis';
 import { getRuntime } from '../runtime.js';
 
-let Redis: typeof import('ioredis').default | null = null;
 let client: RedisType | null = null;
 let connectionAttempted = false;
 
@@ -35,10 +40,7 @@ async function getClient(): Promise<RedisType | null> {
   }
 
   try {
-    if (!Redis) {
-      Redis = (await import('ioredis')).default;
-    }
-    client = new Redis(url, {
+    client = new IORedis(url, {
       maxRetriesPerRequest: 1,
       connectTimeout: 3000,
       lazyConnect: true,
