@@ -9,8 +9,9 @@
  */
 
 import crypto from 'crypto';
-import { bulkIndex, ping, ensureCurrentIndex } from './client.js';
+import { bulkIndex, indexDocument, ping, ensureCurrentIndex } from './client.js';
 import { getLatestEventHashForAgency } from './verify.js';
+import { getRuntime } from '../runtime.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -56,26 +57,35 @@ interface InternalAuditEvent {
 
 // ─── Hash Chain ──────────────────────────────────────────────────────────────
 //
-// `_lastHashByAgency` is an in-process cache of the most recent `eventHash`
-// per agency. On process boot it is empty. Without rehydration, the first
-// publish for an agency after restart would write prevHash = 64 zeros — a
-// silent chain break indistinguishable from a legitimate first event.
+// Cross-process correctness: each chained (agency-scoped) publish takes a
+// Postgres advisory lock keyed on the agency id, reads the latest event
+// hash from ES inside the lock, computes its own hash, writes the event
+// to ES with `?refresh=wait_for` so subsequent readers see it, and
+// releases the lock. Buffer flushing is bypassed for chained events —
+// the lock-then-write pattern only works if our write is durable in ES
+// before the next process can read.
 //
-// To defend the invariant "chain continuity survives process restarts and
-// multi-process scaling" we:
-//   1. Rehydrate from ES on the first publish per agency per process
-//      (see `ensureAgencyHashHydrated`).
-//   2. Serialize publishes per agency through a per-agency promise queue
-//      (see `_agencyQueues`). Two concurrent publishes for the same agency
-//      never race on read → compute → write of the hash. Across processes
-//      this is a best-effort mitigation: the invariant is written-about in
-//      the feature README (Gap #3) and cross-process serialization requires
-//      a dedicated publisher worker, which is out-of-scope here.
+// System-level events (no agency id) participate in no chain and stay on
+// the original buffer-and-flush path for throughput.
+//
+// The pre-fix design used an in-process Map (`_lastHashByAgency`) plus a
+// per-agency Promise queue. Single-process correct, multi-process broken:
+// each process hydrated from ES once, then forked its own chain. Trevox
+// chain integrity was demonstrably broken (multiple prev_hash_mismatch
+// per hour) before this fix landed.
 
 const GENESIS_PREV_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
-const _lastHashByAgency = new Map<string, string>();
-const _hydratedAgencies = new Set<string>();
-const _agencyQueues = new Map<string, Promise<unknown>>();
+
+// Stable 64-bit lock key derivation. Postgres pg_advisory_lock takes a bigint;
+// we hash agency_id into a deterministic int64. MIT-style sha256-then-hi-lo.
+function lockKeyForAgency(agencyId: string): bigint {
+  const h = crypto.createHash('sha256').update(`audit-chain:${agencyId}`).digest();
+  // Use the first 8 bytes as a signed bigint, masked into PG's bigint range.
+  const hi = h.readUInt32BE(0);
+  const lo = h.readUInt32BE(4);
+  // Combine with bit-arithmetic; mask to 63 bits to stay positive.
+  return ((BigInt(hi) << 32n) | BigInt(lo)) & ((1n << 63n) - 1n);
+}
 
 function computeEventHash(event: InternalAuditEvent): string {
   const payload = JSON.stringify({
@@ -92,47 +102,54 @@ function computeEventHash(event: InternalAuditEvent): string {
 }
 
 /**
- * On first publish per agency per process, read the most recent event from ES
- * and prime `_lastHashByAgency`. Null ES response means "no prior events" →
- * we stay on GENESIS. ES errors are swallowed (best-effort) — the next publish
- * will try again; the chain continuity invariant is documented as best-effort.
+ * Acquire a Postgres advisory lock for `agencyId` and run `fn` inside it,
+ * passing the latest event hash from ES (read inside the lock). The lock
+ * is released when the surrounding $transaction commits or rolls back.
+ *
+ * Uses pg_advisory_xact_lock so the lock auto-releases at transaction end —
+ * no leaked locks even if `fn` throws.
+ *
+ * The transaction is short and only holds the lock; the actual ES write
+ * inside `fn` is what matters for chain durability. We use refresh=wait_for
+ * on the ES write so the next process to acquire the lock and read the
+ * latest hash sees our event.
  */
-async function ensureAgencyHashHydrated(agencyId: string): Promise<void> {
-  if (!agencyId || _hydratedAgencies.has(agencyId)) return;
-  try {
-    const latest = await getLatestEventHashForAgency(agencyId);
-    if (latest) {
-      _lastHashByAgency.set(agencyId, latest);
-    }
-  } catch (err: unknown) {
-    console.error('[Audit] Hash rehydrate failed (will retry next publish):', (err as Error).message);
-    return; // do NOT mark hydrated; retry on next publish
+async function withCrossProcessAgencyLock<T>(
+  agencyId: string,
+  fn: (prevHash: string) => Promise<T>,
+): Promise<T> {
+  const { prisma } = getRuntime();
+  if (!prisma) {
+    // Runtime not initialized (e.g. CLI tooling that imports this module
+    // without setRuntime). Fall back to GENESIS on best-effort. This is
+    // worse than holding the lock but better than throwing — historically
+    // the publisher was best-effort anyway.
+    console.warn('[Audit] Runtime prisma missing — chain lock skipped for ' + agencyId);
+    return fn(GENESIS_PREV_HASH);
   }
-  _hydratedAgencies.add(agencyId);
+  const lockKey = lockKeyForAgency(agencyId);
+  return prisma.$transaction(async (tx: { $executeRawUnsafe: (q: string) => Promise<unknown> }) => {
+    // pg_advisory_xact_lock auto-releases at transaction end. Two-arg
+    // form takes (int4, int4); single-arg takes int8 — we use single-arg.
+    await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${lockKey.toString()}::bigint)`);
+    let prevHash = GENESIS_PREV_HASH;
+    try {
+      const latest = await getLatestEventHashForAgency(agencyId);
+      if (latest) prevHash = latest;
+    } catch (err: unknown) {
+      console.error('[Audit] Failed to read latest hash from ES inside lock:', (err as Error).message);
+      // Continue with GENESIS — better to have a chain break here than
+      // to lose the audit event entirely.
+    }
+    return fn(prevHash);
+  });
 }
 
-function getPrevHash(agencyId: string): string {
-  return _lastHashByAgency.get(agencyId) || GENESIS_PREV_HASH;
-}
-
-/**
- * Serialize `fn()` per-agency. Two concurrent callers for the same agency
- * run sequentially; different agencies run in parallel. Failures in `fn`
- * do not poison the queue — the chain is released after each callback.
- */
-function withAgencyLock<T>(agencyId: string, fn: () => Promise<T>): Promise<T> {
-  const prior = _agencyQueues.get(agencyId) || Promise.resolve();
-  const next = prior.then(fn, fn);
-  // Keep the queue tail bounded by always chaining from a settled promise.
-  _agencyQueues.set(agencyId, next.catch(() => undefined));
-  return next;
-}
-
-// Exported for testing — allows resetting in-memory state between cases.
+// Exported for backward-compat with tests; the in-process maps are gone
+// post-multi-process-fork-fix, so this is a no-op. Kept so call sites in
+// existing test files don't need to change.
 export function __resetHashChainStateForTest(): void {
-  _lastHashByAgency.clear();
-  _hydratedAgencies.clear();
-  _agencyQueues.clear();
+  /* no-op: state lives in Postgres advisory locks + ES, not in-process */
 }
 
 // ─── Buffer ──────────────────────────────────────────────────────────────────
@@ -250,22 +267,38 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
     prevHash: '',
   };
 
-  // Compute hash chain — serialized per-agency so concurrent publishes in a
-  // single process cannot both read the same `prevHash` and fork the chain.
+  // Compute hash chain.
+  //
+  // Chained events (agency-scoped) take a Postgres advisory lock keyed on
+  // the agency, read the latest hash from ES inside the lock, compute the
+  // new hash, and write directly to ES with refresh=wait_for so the next
+  // lock-holder reads our event. Buffer is bypassed for chained events —
+  // the lock-then-write pattern requires durable ES persistence before
+  // the lock releases.
+  //
+  // System-level events (no agency_id) keep the buffer-and-flush path for
+  // throughput; they participate in no chain.
   const agencyId = event.agency.id;
   if (agencyId) {
-    await withAgencyLock(agencyId, async () => {
-      await ensureAgencyHashHydrated(agencyId);
-      event.prevHash = getPrevHash(agencyId);
+    await withCrossProcessAgencyLock(agencyId, async (prevHash) => {
+      event.prevHash = prevHash;
       event.eventHash = computeEventHash(event);
-      _lastHashByAgency.set(agencyId, event.eventHash);
+      // Direct write with refresh=wait_for so the next lock-holder sees
+      // this event when it reads the latest hash from ES.
+      await indexDocument(
+        event as unknown as import('./client.js').AuditDocument,
+        { refresh: 'wait_for' },
+      );
     });
-  } else {
-    // No agency id → unchained event (system-level). Still hash the body so
-    // downstream consumers see a non-empty eventHash.
-    event.prevHash = GENESIS_PREV_HASH;
-    event.eventHash = computeEventHash(event);
+
+    // Fire-and-forget notification dispatch (unchanged from original flow).
+    maybeNotify(event).catch(() => {});
+    return event;
   }
+
+  // System-level (unchained) event — keep the original buffer pattern.
+  event.prevHash = GENESIS_PREV_HASH;
+  event.eventHash = computeEventHash(event);
 
   // Add to buffer
   _buffer.push(event);

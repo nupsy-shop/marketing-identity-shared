@@ -156,9 +156,17 @@ export async function ensureCurrentIndex(): Promise<void> {
 
 // ─── Document Operations ─────────────────────────────────────────────────────
 
-export async function indexDocument(doc: AuditDocument): Promise<Record<string, unknown>> {
-  const idx = currentIndexName();
-  const res = await esFetch(`/${idx}/_doc/${doc.eventId}`, {
+export async function indexDocument(
+  doc: AuditDocument,
+  opts?: { refresh?: 'true' | 'false' | 'wait_for' },
+): Promise<Record<string, unknown>> {
+  // Use the document's timestamp to pick the right monthly index, not
+  // the current month — so backdated events (e2e seeding, replay) land
+  // in the correct rollover bucket and don't appear as chain breaks
+  // the next time anyone queries that range.
+  const idx = doc.timestamp ? indexNameForDate(doc.timestamp) : currentIndexName();
+  const refreshQs = opts?.refresh ? `?refresh=${opts.refresh}` : '';
+  const res = await esFetch(`/${idx}/_doc/${doc.eventId}${refreshQs}`, {
     method: 'PUT',
     body: JSON.stringify(doc),
   });
