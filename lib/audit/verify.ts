@@ -171,6 +171,16 @@ async function fetchEventsForChain(
   const max = Math.min(options.maxEvents ?? DEFAULT_MAX_EVENTS, DEFAULT_MAX_EVENTS);
   const must: Record<string, unknown>[] = [
     { term: { 'agency.id': agencyId } },
+    // Only consider events that are part of the chain. The bull worker's
+    // log-transport.ts (marketing-identity-bull/src/lib/log-transport.ts)
+    // ships operational worker logs to the same `audit-*` indices via
+    // direct indexDocument calls, bypassing publishAuditEvent. Those docs
+    // have no `eventHash` / `prevHash` and are NOT part of the chain — but
+    // they sit alongside chained events in ES. Without this filter, the
+    // chain walker treats them as ghost links and reports the next chained
+    // event as `prev_hash_mismatch`. Worker logs remain visible in the
+    // activity feed UI; they just don't participate in chain verification.
+    { exists: { field: 'eventHash' } },
   ];
 
   const { dateFrom, dateTo } = options;
@@ -242,7 +252,17 @@ export async function getLatestEventHashForAgency(agencyId: string): Promise<str
   if (!agencyId) return null;
 
   const queryBody = {
-    query: { bool: { must: [{ term: { 'agency.id': agencyId } }] } },
+    // Same exists-eventHash filter as fetchEventsForChain — worker logs
+    // (no eventHash) must not be returned as the chain head, otherwise
+    // the publisher would compute prevHash against undefined.
+    query: {
+      bool: {
+        must: [
+          { term: { 'agency.id': agencyId } },
+          { exists: { field: 'eventHash' } },
+        ],
+      },
+    },
     sort: [{ timestamp: { order: 'desc' } }],
     size: 1,
     _source: ['eventHash', 'timestamp'],
