@@ -238,7 +238,12 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
 
   const event: InternalAuditEvent = {
     eventId: crypto.randomUUID(),
-    timestamp: new Date().toISOString(),
+    // Timestamp deliberately stamped LATER for chained events. The verify
+    // path orders the chain by `timestamp` ascending — so the timestamp
+    // order MUST match the lock acquisition order, otherwise two concurrent
+    // publishers can leave the chain in a state that decodes as broken.
+    // For system-level (un-chained) events the buffer path stamps below.
+    timestamp: '',
     eventType: params.eventType || params.type || 'unknown',
     source: params.source || 'accesshive',
     severity: params.severity || 'info',
@@ -281,6 +286,13 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
   const agencyId = event.agency.id;
   if (agencyId) {
     await withCrossProcessAgencyLock(agencyId, async (prevHash) => {
+      // Stamp `timestamp` INSIDE the lock so the chain's authored time
+      // matches its lock-acquisition order. Without this, a concurrent
+      // caller that entered `publishAuditEvent` first but lost the lock
+      // race ends up with an EARLIER timestamp than its predecessor —
+      // the verifier (which sorts ascending by timestamp) then sees its
+      // prev_hash pointing at the wrong neighbour and reports a break.
+      event.timestamp = new Date().toISOString();
       event.prevHash = prevHash;
       event.eventHash = computeEventHash(event);
       // Direct write with refresh=wait_for so the next lock-holder sees
@@ -297,6 +309,8 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
   }
 
   // System-level (unchained) event — keep the original buffer pattern.
+  // Un-chained events don't need lock-ordered timestamps; stamp now.
+  event.timestamp = new Date().toISOString();
   event.prevHash = GENESIS_PREV_HASH;
   event.eventHash = computeEventHash(event);
 
