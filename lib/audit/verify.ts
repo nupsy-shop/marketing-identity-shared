@@ -183,6 +183,21 @@ async function fetchEventsForChain(
     { exists: { field: 'eventHash' } },
   ];
 
+  // The E2E harness's `tests/support/audit-writer.ts` writes events with
+  // `eventHash: ZERO_HASH` and `prevHash: ZERO_HASH` because they are
+  // intentionally NOT linked into the real chain (see the module-level
+  // comment in audit-writer.ts). The `{ exists: eventHash }` filter above
+  // doesn't reject them — `'0'.repeat(64)` is a real value. Without this
+  // exclusion, every zero-hashed event interleaved by timestamp into a
+  // tenant's chain shows up as an event whose `prev_hash` doesn't match
+  // its predecessor's `eventHash`, and the verifier reports a cascade
+  // of broken links. Production code never writes zero hashes (the
+  // publisher always computes a real HMAC), so the filter is safe to
+  // apply unconditionally.
+  const must_not: Record<string, unknown>[] = [
+    { term: { eventHash: '0000000000000000000000000000000000000000000000000000000000000000' } },
+  ];
+
   const { dateFrom, dateTo } = options;
   if (dateFrom || dateTo) {
     const range: Record<string, string> = {};
@@ -192,7 +207,7 @@ async function fetchEventsForChain(
   }
 
   const queryBody = {
-    query: { bool: { must } },
+    query: { bool: { must, must_not } },
     sort: [{ timestamp: { order: 'asc' } }],
     size: max,
     track_total_hits: true,
@@ -252,14 +267,21 @@ export async function getLatestEventHashForAgency(agencyId: string): Promise<str
   if (!agencyId) return null;
 
   const queryBody = {
-    // Same exists-eventHash filter as fetchEventsForChain — worker logs
-    // (no eventHash) must not be returned as the chain head, otherwise
-    // the publisher would compute prevHash against undefined.
+    // Same filters as fetchEventsForChain:
+    //   - exists eventHash → drop bull worker log-transport rows (no hash)
+    //   - must_not eventHash=ZERO → drop E2E audit-writer.ts rows that are
+    //     deliberately written un-chained. If the publisher returned a
+    //     ZERO_HASH as `prevHash` for the next chained event, every
+    //     subsequent chain row would point at GENESIS instead of the real
+    //     previous hash — silently breaking the chain on the next write.
     query: {
       bool: {
         must: [
           { term: { 'agency.id': agencyId } },
           { exists: { field: 'eventHash' } },
+        ],
+        must_not: [
+          { term: { eventHash: '0000000000000000000000000000000000000000000000000000000000000000' } },
         ],
       },
     },
