@@ -295,11 +295,34 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
       event.timestamp = new Date().toISOString();
       event.prevHash = prevHash;
       event.eventHash = computeEventHash(event);
-      // Direct write with refresh=wait_for so the next lock-holder sees
+      // Direct write with refresh=true so the next lock-holder sees
       // this event when it reads the latest hash from ES.
+      //
+      // We previously used `?refresh=wait_for` here. That should have
+      // worked in theory — wait_for blocks the call until the next
+      // refresh cycle makes the doc searchable — but in practice it
+      // raced under concurrent E2E load. Two contributing factors:
+      //   1. The audit indices are configured with
+      //      `index.refresh_interval: 5s` (longer than the ES default
+      //      1s), so `wait_for` could block up to 5s per write.
+      //   2. ES has a per-shard listener queue cap on wait_for; past
+      //      the cap, requests are processed WITHOUT waiting,
+      //      effectively becoming `refresh=false`. Under bursts of
+      //      concurrent writes (the E2E harness routinely fires
+      //      ~12 publishAuditEvent calls within a single scenario),
+      //      docs would land in ES without being immediately
+      //      searchable. The next lock-holder's
+      //      `getLatestEventHashForAgency` query missed them and
+      //      stamped its `prev_hash` against an older predecessor —
+      //      forking the chain.
+      // `refresh=true` forces a per-write refresh and is more
+      // expensive, but the chain's tamper-evidence guarantees only
+      // hold if every chained write is visible to the next reader.
+      // Audit volume per agency is bounded enough that the cost
+      // is acceptable.
       await indexDocument(
         event as unknown as import('./client.js').AuditDocument,
-        { refresh: 'wait_for' },
+        { refresh: 'true' },
       );
     });
 
