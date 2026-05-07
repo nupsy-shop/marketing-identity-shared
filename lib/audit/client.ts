@@ -208,10 +208,24 @@ export async function search(
   aggregations?: Record<string, { buckets?: Array<{ key: string; doc_count: number }> }>;
 }> {
   const idx = indices || allIndicesPattern();
-  const res = await esFetch(`/${idx}/_search`, {
-    method: 'POST',
-    body: JSON.stringify(queryBody),
-  });
+  // `ignore_unavailable=true&allow_no_indices=true` — when callers pass
+  // a comma-separated list of specific monthly indices (e.g.
+  // `audit-2026.05,audit-2026.04,audit-2026.03`), one or more of the
+  // months may not exist yet — a freshly-truncated tenant only has
+  // the current month, and a brand-new agency has no prior history at
+  // all. Without these flags ES returns 404 (index_not_found_exception)
+  // instead of an empty result set, which breaks every chain-walk and
+  // every freshly-seeded mutation scenario. The wildcard `audit-*`
+  // path doesn't need them (matching zero indices is fine), but it's
+  // safe to include unconditionally — a missing wildcard match still
+  // returns 200 with zero hits.
+  const res = await esFetch(
+    `/${idx}/_search?ignore_unavailable=true&allow_no_indices=true`,
+    {
+      method: 'POST',
+      body: JSON.stringify(queryBody),
+    },
+  );
 
   if (!res.ok) {
     const text = await res.text();
