@@ -291,9 +291,38 @@ export async function getLatestEventHashForAgency(agencyId: string): Promise<str
   };
 
   try {
-    const result = await search(queryBody, allIndicesPattern());
-    const hits = result.hits?.hits || [];
-    if (hits.length === 0) return null;
+    // Query specific monthly indices instead of `audit-*` wildcard.
+    //
+    // The hosted ES (Searchly) takes ~1 second to surface a refresh=true
+    // write to wildcard searches, even though the same write IS visible
+    // immediately when querying the specific index it was written to.
+    // The publisher's chain-write path uses refresh=true and then
+    // immediately reads back via this function — under that timing the
+    // wildcard read returns 0 hits and the next chain write inherits
+    // GENESIS as prev_hash, forking the chain.
+    //
+    // We query the current month + the prior two months explicitly. This
+    // covers chain heads near monthly index rollover (rare) and avoids
+    // the wildcard latency. If the agency's last event is older than
+    // three months, we fall back to the wildcard (which by then has
+    // refreshed) so the cold-start case still works.
+    const now = new Date();
+    const recentIndices: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const d = new Date(now.getUTCFullYear(), now.getUTCMonth() - i, 1);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+      recentIndices.push(`audit-${y}.${m}`);
+    }
+    let result = await search(queryBody, recentIndices.join(','));
+    let hits = result.hits?.hits || [];
+    if (hits.length === 0) {
+      // Fall back to wildcard for agencies whose last activity was more
+      // than three months ago.
+      result = await search(queryBody, allIndicesPattern());
+      hits = result.hits?.hits || [];
+      if (hits.length === 0) return null;
+    }
     const src = hits[0]._source as { eventHash?: string };
     return src.eventHash || null;
   } catch (err: unknown) {
