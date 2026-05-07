@@ -89,7 +89,22 @@ export function computeEventHash(event: ChainableEvent): string {
 // ─── Index range computation (mirrors query.ts) ─────────────────────────────
 
 function computeIndices(dateFrom?: string | null, dateTo?: string | null): string {
-  if (!dateFrom && !dateTo) return allIndicesPattern();
+  if (!dateFrom && !dateTo) {
+    // No range supplied — default to the current month + prior two
+    // months. Hosted ES (Searchly) wildcard searches lag refresh=true
+    // writes by ~1s, which silently miss freshly-seeded events. The
+    // same fix as `getLatestEventHashForAgency` (this file): query
+    // specific indices first; the unbounded wildcard fallback only
+    // runs from `verifyChain`'s explicit caller path when the chain
+    // walker comes up empty.
+    const now = new Date();
+    const recent = new Set<string>();
+    for (let i = 0; i < 3; i++) {
+      const d = new Date(now.getUTCFullYear(), now.getUTCMonth() - i, 1);
+      recent.add(indexNameForDate(d));
+    }
+    return [...recent].join(',');
+  }
 
   const start = dateFrom ? new Date(dateFrom) : new Date(Date.now() - 365 * 86_400_000);
   const end = dateTo ? new Date(dateTo) : new Date();
