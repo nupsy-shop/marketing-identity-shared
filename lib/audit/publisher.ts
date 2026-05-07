@@ -114,9 +114,46 @@ function computeEventHash(event: InternalAuditEvent): string {
  * on the ES write so the next process to acquire the lock and read the
  * latest hash sees our event.
  */
+/**
+ * Run `fn` under a per-agency Postgres advisory lock, with the chain
+ * head pointer (`audit_chain_head.last_event_hash`) read AND updated
+ * inside the same transaction.
+ *
+ * Why Postgres-tracked head, not ES-tracked:
+ *   The previous design read the predecessor hash from ES via
+ *   `getLatestEventHashForAgency`. Under E2E burst load that read
+ *   raced — even with `?refresh=true` writes and specific-index
+ *   queries, Searchly's read-after-write visibility lagged enough
+ *   that successive lock-holders saw an older "latest event" and
+ *   chained onto a stale predecessor. A walk of trevox after run #21
+ *   showed 916 of 1000 events with prev=GENESIS mid-chain.
+ *   See issue #689 for the full diagnosis.
+ *
+ *   With the chain head in Postgres, the lock + head-read happen on
+ *   the same connection in the same transaction. Postgres MVCC
+ *   guarantees the next lock-holder reads the just-written value;
+ *   ES visibility latency is no longer in the critical path for chain
+ *   coordination. ES still receives the event with refresh=true, and
+ *   the verifier still walks events from ES — only the chain-coordinate
+ *   write-path moved.
+ *
+ * Bootstrap: when `audit_chain_head` has no row for this agency yet
+ * (first write after the migration, or a freshly-created agency),
+ * we fall back to `getLatestEventHashForAgency` to seed from existing
+ * ES history. The seeded value is written to the table before fn runs,
+ * so subsequent lock-holders read it from Postgres.
+ *
+ * `fn` receives the predecessor hash and is expected to write the
+ * new event. After fn resolves successfully, this function UPSERTs
+ * `audit_chain_head` with the just-published `eventHash` (which the
+ * caller mutates onto the shared `event` object before returning).
+ * The whole sequence is one tx; if fn throws, the upsert is rolled
+ * back and no chain-head movement is recorded.
+ */
 async function withCrossProcessAgencyLock<T>(
   agencyId: string,
   fn: (prevHash: string) => Promise<T>,
+  newEventHashGetter: () => string,
 ): Promise<T> {
   const { prisma } = getRuntime();
   if (!prisma) {
@@ -128,21 +165,66 @@ async function withCrossProcessAgencyLock<T>(
     return fn(GENESIS_PREV_HASH);
   }
   const lockKey = lockKeyForAgency(agencyId);
-  return prisma.$transaction(async (tx: { $executeRawUnsafe: (q: string) => Promise<unknown> }) => {
-    // pg_advisory_xact_lock auto-releases at transaction end. Two-arg
-    // form takes (int4, int4); single-arg takes int8 — we use single-arg.
-    await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${lockKey.toString()}::bigint)`);
-    let prevHash = GENESIS_PREV_HASH;
-    try {
-      const latest = await getLatestEventHashForAgency(agencyId);
-      if (latest) prevHash = latest;
-    } catch (err: unknown) {
-      console.error('[Audit] Failed to read latest hash from ES inside lock:', (err as Error).message);
-      // Continue with GENESIS — better to have a chain break here than
-      // to lose the audit event entirely.
-    }
-    return fn(prevHash);
-  });
+  return prisma.$transaction(
+    async (tx: {
+      $executeRawUnsafe: (q: string) => Promise<unknown>;
+      $queryRawUnsafe: <R>(q: string, ...params: unknown[]) => Promise<R>;
+      audit_chain_head: {
+        upsert: (args: {
+          where: { agency_id: string };
+          create: { agency_id: string; last_event_hash: string };
+          update: { last_event_hash: string };
+        }) => Promise<unknown>;
+      };
+    }) => {
+      // pg_advisory_xact_lock auto-releases at transaction end. Two-arg
+      // form takes (int4, int4); single-arg takes int8 — we use single-arg.
+      await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${lockKey.toString()}::bigint)`);
+
+      // Read the chain head from Postgres on the SAME tx. Strictly
+      // serialized vs. any concurrent writer queued behind the lock.
+      let prevHash = GENESIS_PREV_HASH;
+      const headRows = await tx.$queryRawUnsafe<Array<{ last_event_hash: string }>>(
+        `SELECT last_event_hash FROM audit_chain_head WHERE agency_id = $1::uuid LIMIT 1`,
+        agencyId,
+      );
+      if (headRows.length > 0 && headRows[0].last_event_hash) {
+        prevHash = headRows[0].last_event_hash;
+      } else {
+        // Bootstrap: no head row yet. Seed from ES (existing chain
+        // history) so we don't reset a tenant's chain just because
+        // the table is freshly migrated. If ES read fails or returns
+        // empty, GENESIS is the correct value (legitimate first event).
+        try {
+          const latest = await getLatestEventHashForAgency(agencyId);
+          if (latest) prevHash = latest;
+        } catch (err: unknown) {
+          console.error(
+            '[Audit] Bootstrap read of latest hash from ES failed:',
+            (err as Error).message,
+          );
+          // Continue with GENESIS — chain break here is preferable
+          // to losing the audit event entirely.
+        }
+      }
+
+      // Run the caller's write path with the predecessor hash. The
+      // caller mutates `event.eventHash` to the new value, which we
+      // then commit to the chain head before the tx releases the lock.
+      const result = await fn(prevHash);
+
+      const newHash = newEventHashGetter();
+      if (newHash && newHash !== prevHash) {
+        await tx.audit_chain_head.upsert({
+          where: { agency_id: agencyId },
+          create: { agency_id: agencyId, last_event_hash: newHash },
+          update: { last_event_hash: newHash },
+        });
+      }
+
+      return result;
+    },
+  );
 }
 
 // Exported for backward-compat with tests; the in-process maps are gone
@@ -285,16 +367,18 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
   // throughput; they participate in no chain.
   const agencyId = event.agency.id;
   if (agencyId) {
-    await withCrossProcessAgencyLock(agencyId, async (prevHash) => {
-      // Stamp `timestamp` INSIDE the lock so the chain's authored time
-      // matches its lock-acquisition order. Without this, a concurrent
-      // caller that entered `publishAuditEvent` first but lost the lock
-      // race ends up with an EARLIER timestamp than its predecessor —
-      // the verifier (which sorts ascending by timestamp) then sees its
-      // prev_hash pointing at the wrong neighbour and reports a break.
-      event.timestamp = new Date().toISOString();
-      event.prevHash = prevHash;
-      event.eventHash = computeEventHash(event);
+    await withCrossProcessAgencyLock(
+      agencyId,
+      async (prevHash) => {
+        // Stamp `timestamp` INSIDE the lock so the chain's authored time
+        // matches its lock-acquisition order. Without this, a concurrent
+        // caller that entered `publishAuditEvent` first but lost the lock
+        // race ends up with an EARLIER timestamp than its predecessor —
+        // the verifier (which sorts ascending by timestamp) then sees its
+        // prev_hash pointing at the wrong neighbour and reports a break.
+        event.timestamp = new Date().toISOString();
+        event.prevHash = prevHash;
+        event.eventHash = computeEventHash(event);
       // Direct write with refresh=true so the next lock-holder sees
       // this event when it reads the latest hash from ES.
       //
@@ -324,7 +408,13 @@ export async function publishAuditEvent(params: AuditEventPayload): Promise<Inte
         event as unknown as import('./client.js').AuditDocument,
         { refresh: 'true' },
       );
-    });
+      },
+      // After fn resolves, withCrossProcessAgencyLock UPSERTs
+      // audit_chain_head with this hash inside the same tx — the
+      // next lock-holder reads it from Postgres without depending on
+      // ES read-after-write visibility.
+      () => event.eventHash,
+    );
 
     // Fire-and-forget notification dispatch (unchanged from original flow).
     maybeNotify(event).catch(() => {});
