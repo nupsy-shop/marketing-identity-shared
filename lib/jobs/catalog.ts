@@ -45,6 +45,7 @@ export const QUEUE_NAMES = {
   NOTIFICATIONS: 'notifications',
   BULK_OPS: 'bulk-ops',
   SYSTEM: 'system',
+  AUDIT_INDEXING: 'audit-indexing', // ← audit log indexing & ES reconciliation
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -186,6 +187,10 @@ export const JOB_CATALOG = {
   dispatch_refresh_cost_optimization:    { queue: QUEUE_NAMES.SYSTEM }, // daily 03:00 #58
   dispatch_refresh_access_analytics:     { queue: QUEUE_NAMES.SYSTEM }, // hourly #59
   dispatch_partner_access_review:        { queue: QUEUE_NAMES.SYSTEM }, // daily 07:00, gated to 1st of month #63
+
+  // ─── Audit indexing & sealing (system-scoped) ───────────────────────
+  audit_index_es:     { queue: QUEUE_NAMES.AUDIT_INDEXING },
+  audit_reconcile_es: { queue: QUEUE_NAMES.AUDIT_INDEXING },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
