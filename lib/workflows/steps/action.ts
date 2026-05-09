@@ -23,6 +23,7 @@ import { getRuntime } from '../../runtime.js';
 import { publishAuditEvent } from '../../audit/publisher.js';
 import { dispatchNotification } from '../../notifications/dispatch.js';
 import { getRemediationHandler } from '../../../plugins/identity/remediations-registry.js';
+import { getPlatformRemediationHandler } from '../../../plugins/platforms/remediations-registry.js';
 import type { StepDefinition, WorkflowContext, WorkflowInstance, StepExecutionResult } from '../types.js';
 
 // ---- Action Handler Types --------------------------------------------------
@@ -355,18 +356,24 @@ const actionHandlers: Record<string, ActionHandler> = {
 /**
  * Resolve a handler for the given action type:
  *   1. central dict (primitives)
- *   2. plugin registry (namespaced `<plugin-key>:<action>`)
- *   3. null → caller fails the step
+ *   2. identity plugin registry (namespaced `<plugin-key>:<action>`)
+ *   3. platform plugin registry (namespaced `<plugin-key>:<action>`)
+ *   4. null → caller fails the step
  */
 function resolveHandler(actionType: string): ActionHandler | null {
   const central = actionHandlers[actionType];
   if (central) return central;
 
-  const pluginHandler = getRemediationHandler(actionType);
-  if (pluginHandler) {
+  const identityPluginHandler = getRemediationHandler(actionType);
+  if (identityPluginHandler) {
     // Adapt the plugin contract's structural types to the host's
     // WorkflowContext/WorkflowInstance. They are structurally compatible.
-    return pluginHandler as unknown as ActionHandler;
+    return identityPluginHandler as unknown as ActionHandler;
+  }
+
+  const platformPluginHandler = getPlatformRemediationHandler(actionType);
+  if (platformPluginHandler) {
+    return platformPluginHandler as unknown as ActionHandler;
   }
 
   return null;
