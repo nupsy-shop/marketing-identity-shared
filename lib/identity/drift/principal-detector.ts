@@ -18,6 +18,8 @@
  * Coverage (per autonomy matrix):
  *   - Local Directory + identity + drift_type='keycloak_missing'  → auto (#90)
  *   - GW / Entra     + synthetic_identity + 'provider_missing'    → auto (#89)
+ *   - GW / Entra     + identity + 'identity_missing'              → flag-and-notify
+ *   - GW / Entra     + identity + 'identity_inactive'             → flag-and-notify
  *
  * GW / Entra users are also visited but the orchestrator short-circuits
  * them with reason `jml_owns_users`.
@@ -222,8 +224,11 @@ export async function collectMissingHumanIdentitySignals(
       select: { email: true },
     });
   } else {
+    // Entra: filter is_present_in_idp=true so soft-deleted rows (removed from
+    // Graph but still cached) are excluded from the "present" set.
+    // GWS does not have this column — leave the GWS branch as-is.
     cachedRows = await prisma.entra_directory_users.findMany({
-      where: { source_id: { in: sourceIds } },
+      where: { source_id: { in: sourceIds }, is_present_in_idp: true },
       select: { email: true },
     });
   }
@@ -244,6 +249,101 @@ export async function collectMissingHumanIdentitySignals(
       ? ('healthy' as const)
       : ('unhealthy' as const),
   }));
+}
+
+/**
+ * Collect `identity_inactive` drift signals for HUMAN_INTERACTIVE identities
+ * on a given provider. An HI identity is unhealthy when its `identifier`
+ * (email) is present in the cached directory table for that provider AND the
+ * corresponding row has `is_active = false`.
+ *
+ * If the identity's email is absent from the cache entirely, that is
+ * `identity_missing` territory — handled by `collectMissingHumanIdentitySignals`.
+ * This collector emits nothing for that case.
+ *
+ * For Entra: only rows with `is_present_in_idp = true` are considered (rows
+ * with `is_present_in_idp = false` are the missing domain — excluded here).
+ *
+ * Any-active-wins semantics across multiple sources: if ANY row for the email
+ * is active, the identity is healthy.
+ *
+ * Empty-cache guard: same as `collectMissingHumanIdentitySignals` — if the
+ * union of all source caches is empty, no signals are emitted.
+ */
+export async function collectInactiveHumanIdentitySignals(
+  agencyId: string,
+  providerKey: 'google-workspace' | 'entra-id',
+): Promise<PrincipalSignal[]> {
+  const { prisma } = getRuntime();
+
+  // 1. HI identities targeting this provider for this agency.
+  const identities = await prisma.integration_identities.findMany({
+    where: {
+      agency_id: agencyId,
+      isActive: true,
+      type: 'HUMAN_INTERACTIVE',
+      provisioning_targets: { has: providerKey },
+    },
+    select: { id: true, identifier: true },
+  });
+
+  if (identities.length === 0) return [];
+
+  // 2. Identity sources for this agency + plugin.
+  const sources = await prisma.identity_sources.findMany({
+    where: { agency_id: agencyId, plugin_key: providerKey },
+    select: { id: true },
+  });
+
+  if (sources.length === 0) return [];
+
+  const sourceIds = sources.map((s: { id: string }) => s.id);
+
+  // 3. Fetch cached directory rows with is_active for these sources.
+  type Row = { email: string; is_active: boolean };
+  let rows: Row[] = [];
+  if (providerKey === 'google-workspace') {
+    rows = await prisma.gws_directory_users.findMany({
+      where: { source_id: { in: sourceIds } },
+      select: { email: true, is_active: true },
+    });
+  } else {
+    // Entra: exclude is_present_in_idp=false (those are identity_missing domain).
+    rows = await prisma.entra_directory_users.findMany({
+      where: { source_id: { in: sourceIds }, is_present_in_idp: true },
+      select: { email: true, is_active: true },
+    });
+  }
+
+  // 4. Empty-cache guard: initial sync may not have run yet.
+  if (rows.length === 0) return [];
+
+  // 5. Build email → is_active map with any-active-wins semantics:
+  //    If ANY row for an email is active, the identity is active.
+  //    Inactive only when every matching row is inactive.
+  const activeByEmail = new Map<string, boolean>();
+  for (const r of rows) {
+    const email = r.email.toLowerCase();
+    if (activeByEmail.get(email) === true) continue; // already known active
+    activeByEmail.set(email, r.is_active);
+  }
+
+  // 6. Emit one signal per HI identity that appears in the cache.
+  //    Identities absent from the cache are identity_missing territory — skip.
+  const signals: PrincipalSignal[] = [];
+  for (const identity of identities as Array<{ id: string; identifier: string }>) {
+    const email = identity.identifier.toLowerCase();
+    if (!activeByEmail.has(email)) continue; // not in cache → missing's job
+    const isActive = activeByEmail.get(email)!;
+    signals.push({
+      sourcePluginKey: providerKey,
+      principalType: 'identity' as const,
+      principalId: identity.id,
+      driftType: 'identity_inactive',
+      currentState: isActive ? ('healthy' as const) : ('unhealthy' as const),
+    });
+  }
+  return signals;
 }
 
 /**
@@ -303,6 +403,8 @@ export async function detectPrincipalDrift(
     ...(await collectSyntheticIdentitySignals(agencyId, 'entra-id')),
     ...(await collectMissingHumanIdentitySignals(agencyId, 'google-workspace')),
     ...(await collectMissingHumanIdentitySignals(agencyId, 'entra-id')),
+    ...(await collectInactiveHumanIdentitySignals(agencyId, 'google-workspace')),
+    ...(await collectInactiveHumanIdentitySignals(agencyId, 'entra-id')),
   ];
   const emissions = await upsertAndDedupe(agencyId, signals);
 
