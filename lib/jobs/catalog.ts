@@ -45,6 +45,8 @@ export const QUEUE_NAMES = {
   NOTIFICATIONS: 'notifications',
   BULK_OPS: 'bulk-ops',
   SYSTEM: 'system',
+  AUDIT_INDEXING: 'audit-indexing', // ← audit log indexing & ES reconciliation
+  AUDIT_SEALING: 'audit-sealing',  // ← audit log sealing, TSA retry, archive snapshots
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -156,6 +158,7 @@ export const JOB_CATALOG = {
   identity_sync:  { queue: QUEUE_NAMES.BULK_OPS },
   bulk_provision: { queue: QUEUE_NAMES.BULK_OPS },
   bulk_revoke:    { queue: QUEUE_NAMES.BULK_OPS },
+  audit_export:   { queue: QUEUE_NAMES.BULK_OPS },
 
   // ─── System (no tenantId) ───────────────────────────────────────────
   dispatch_poll_audits:       { queue: QUEUE_NAMES.SYSTEM },
@@ -186,6 +189,16 @@ export const JOB_CATALOG = {
   dispatch_refresh_cost_optimization:    { queue: QUEUE_NAMES.SYSTEM }, // daily 03:00 #58
   dispatch_refresh_access_analytics:     { queue: QUEUE_NAMES.SYSTEM }, // hourly #59
   dispatch_partner_access_review:        { queue: QUEUE_NAMES.SYSTEM }, // daily 07:00, gated to 1st of month #63
+
+  // ─── Audit indexing & sealing (system-scoped) ───────────────────────
+  audit_index_es:     { queue: QUEUE_NAMES.AUDIT_INDEXING },
+  audit_reconcile_es: { queue: QUEUE_NAMES.AUDIT_INDEXING },
+  // Sealing is its own queue (not AUDIT_INDEXING) because the sealer is
+  // long-running per cycle, single-instance — it must not compete with the
+  // high-fan-out indexer workers for Bull concurrency slots.
+  audit_seal:               { queue: QUEUE_NAMES.AUDIT_SEALING },
+  audit_tsa_retry:          { queue: QUEUE_NAMES.AUDIT_SEALING },
+  audit_archive_snapshot:   { queue: QUEUE_NAMES.AUDIT_SEALING },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
