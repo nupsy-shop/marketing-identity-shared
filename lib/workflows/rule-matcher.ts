@@ -98,8 +98,12 @@ export async function matchWorkflow(
  *   - GW/Entra + identity + identity_missing          → flag-missing-*-identity
  *   - GW/Entra + identity + identity_inactive         → flag-inactive-*-identity
  *   - GW/Entra + orphan + orphan_in_federation        → flag-orphan-*-identity
- *   - platform_grant + UNAUTHORIZED_*                 → drift-flag-{platform}-audit-event
+ *   - platform_grant + UNAUTHORIZED_GRANT              → drift-revoke-{platform}-grant (auto-revoke)
+ *                                                       then drift-flag-{platform}-audit-event (flag)
  *                                                       then drift-flag-platform-audit-event (generic)
+ *   - platform_grant + UNAUTHORIZED_REVOKE             → drift-flag-{platform}-audit-event (flag-only)
+ *                                                       then drift-flag-platform-audit-event (generic)
+ *                                                       (no auto-restore — could undo admin cleanup)
  *
  * Users on GW/Entra are filtered by the autonomy matrix before we're called
  * (JML owns them).
@@ -166,20 +170,29 @@ function resolveDriftTemplateKeys(context: Record<string, unknown>): string[] {
     return ['drift-flag-orphan-entra-identity'];
   }
 
-  // Platform-audit drift fallback (any platform, any UNAUTHORIZED_* driftType).
-  // Per-platform plugins can register more specific templates that take
-  // precedence — see `drift-flag-{platform}-audit-event` convention.
-  // The generic `drift-flag-platform-audit-event` is the catch-all.
-  if (
-    principalType === 'platform_grant' &&
-    (driftType === 'UNAUTHORIZED_GRANT' || driftType === 'UNAUTHORIZED_REVOKE')
-  ) {
-    const candidates: string[] = [];
-    if (pluginKey) {
-      candidates.push(`drift-flag-${pluginKey}-audit-event`);
+  // Platform-audit drift — route by driftType for asymmetric policy:
+  //   UNAUTHORIZED_GRANT  → try revoke template first, then flag, then generic.
+  //   UNAUTHORIZED_REVOKE → flag-only (no auto-restore; could undo admin cleanup).
+  if (principalType === 'platform_grant') {
+    if (driftType === 'UNAUTHORIZED_GRANT' && pluginKey) {
+      // Try platform-specific revoke first, then platform-specific flag, then generic.
+      return [
+        `drift-revoke-${pluginKey}-grant`,
+        `drift-flag-${pluginKey}-audit-event`,
+        'drift-flag-platform-audit-event',
+      ];
     }
-    candidates.push('drift-flag-platform-audit-event');
-    return candidates;
+    if (driftType === 'UNAUTHORIZED_REVOKE' && pluginKey) {
+      // No auto-restore by design — flag-only. Try platform-specific flag, then generic.
+      return [
+        `drift-flag-${pluginKey}-audit-event`,
+        'drift-flag-platform-audit-event',
+      ];
+    }
+    if (driftType === 'UNAUTHORIZED_GRANT' || driftType === 'UNAUTHORIZED_REVOKE') {
+      // Unknown plugin — fall through to generic flag.
+      return ['drift-flag-platform-audit-event'];
+    }
   }
 
   return [];

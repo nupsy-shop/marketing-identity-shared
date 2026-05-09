@@ -98,6 +98,31 @@ export interface RuntimeServices {
     userId: string,
     reason: string,
   ) => Promise<{ reprovisioned?: number } | undefined>;
+
+  /**
+   * Optional platform-revoke registry, registered by the host. Keyed by
+   * plugin key (e.g. 'ga4', 'meta'). Each function revokes a single
+   * unauthorized grant on that platform.
+   *
+   * Worker leaves this undefined entirely — auto-revoke handlers fall
+   * back to flag-only behavior with a clear note. See `flag_platform_audit_event`
+   * for the fallback path.
+   *
+   * Web registers entries per platform via dynamic imports (avoid eager
+   * load of platform plugin chains on every shared-runtime-init).
+   *
+   * Returns `{ revoked: boolean, details?: string }` — `revoked: false`
+   * indicates the revoke API rejected the request (e.g. binding not found,
+   * already revoked, permission error). The handler audits this state and
+   * still returns success at the workflow level.
+   */
+  revokePlatformAccess?: {
+    [pluginKey: string]: (
+      agencyId: string,
+      userEmail: string,
+      resource: { type?: string; id?: string; name?: string } | undefined,
+    ) => Promise<{ revoked: boolean; details?: string }>;
+  };
 }
 
 // Use globalThis to ensure a single instance across compiled modules.
