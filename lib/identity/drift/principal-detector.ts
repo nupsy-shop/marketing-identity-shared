@@ -29,12 +29,14 @@ import { getRuntime } from '../../runtime.js';
 import { evaluateAndRemediate } from '../../governance/remediation-engine.js';
 import { evaluateSourceGates, type GateReason } from './principal-detector-gates.js';
 import { publishAuditEvent } from '../../audit/publisher.js';
+import { getDriftAdapter } from '../../../plugins/identity/drift-adapter-registry.js';
+import type { ConnectionConfigShape } from './types.js';
 
 export type DriftFindingState = 'healthy' | 'unhealthy';
 
 export interface PrincipalSignal {
   sourcePluginKey: string;
-  principalType: 'identity' | 'user' | 'synthetic_identity';
+  principalType: 'identity' | 'user' | 'synthetic_identity' | 'orphan';
   principalId: string;
   driftType: string;
   currentState: DriftFindingState;
@@ -383,6 +385,66 @@ export async function collectSyntheticIdentitySignals(
 }
 
 /**
+ * Collect `orphan_in_federation` drift signals for provider users in the
+ * federated space (GWS managed OU / Entra federated domain) that have no
+ * matching `integration_identities` record for this agency.
+ *
+ * Design decision: Option B — flag-and-notify. No auto-create (would
+ * legitimize unauthorized access), no auto-revoke (would disrupt legitimate
+ * vendor/service accounts). Admin must disposition each orphan manually.
+ *
+ * Skips sources where `describeFederatedSpace(cfg).configured === false` to
+ * avoid false positives on sources that don't define a federated space.
+ *
+ * `principalType` is `'orphan'` — these have no integration_identities row.
+ * `principalId` is the email (lowercased) — natural key for orphans.
+ */
+export async function collectFederationOrphanSignals(
+  agencyId: string,
+  providerKey: 'google-workspace' | 'entra-id',
+): Promise<PrincipalSignal[]> {
+  const { prisma } = getRuntime();
+
+  const sources = await prisma.identity_sources.findMany({
+    where: { agency_id: agencyId, plugin_key: providerKey },
+    select: { id: true, connection_config: true },
+  });
+  if (sources.length === 0) return [];
+
+  // Build exclude set: every existing integration_identities.identifier for the agency.
+  type IdentifierRow = { identifier: string };
+  const existing: IdentifierRow[] = await prisma.integration_identities.findMany({
+    where: { agency_id: agencyId },
+    select: { identifier: true },
+  });
+  const excludeEmails = new Set<string>(
+    existing.map((i) => i.identifier.toLowerCase()),
+  );
+
+  const adapter = getDriftAdapter(providerKey);
+
+  const signals: PrincipalSignal[] = [];
+  for (const src of sources) {
+    const cfg = (src.connection_config ?? {}) as ConnectionConfigShape;
+
+    // Gate: skip if no federated space configured for this source.
+    if (!adapter.describeFederatedSpace(cfg).configured) continue;
+
+    const orphans = await adapter.findFederationOrphans(src.id, agencyId, cfg, excludeEmails);
+    for (const o of orphans) {
+      signals.push({
+        sourcePluginKey: providerKey,
+        principalType: 'orphan' as const,
+        principalId: o.email.toLowerCase(),
+        driftType: 'orphan_in_federation',
+        currentState: 'unhealthy' as const,
+      });
+    }
+  }
+  return signals;
+}
+
+/**
  * Run principal drift detection for one agency. Forwards each emission
  * to the remediation pipeline — the orchestrator enforces the autonomy
  * matrix, rate limit + circuit breaker, then dispatches.
@@ -405,6 +467,8 @@ export async function detectPrincipalDrift(
     ...(await collectMissingHumanIdentitySignals(agencyId, 'entra-id')),
     ...(await collectInactiveHumanIdentitySignals(agencyId, 'google-workspace')),
     ...(await collectInactiveHumanIdentitySignals(agencyId, 'entra-id')),
+    ...(await collectFederationOrphanSignals(agencyId, 'google-workspace')),
+    ...(await collectFederationOrphanSignals(agencyId, 'entra-id')),
   ];
   const emissions = await upsertAndDedupe(agencyId, signals);
 
