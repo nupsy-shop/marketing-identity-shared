@@ -73,9 +73,9 @@ export async function matchWorkflow(
   // the plugin-owned template. Other triggers fall through to
   // default_approval_mode.
   if (triggerType === 'drift.detected') {
-    const driftKey = resolveDriftTemplateKey(context);
-    if (driftKey) {
-      const def = await findDefinition(agencyId, driftKey);
+    const driftKeys = resolveDriftTemplateKeys(context);
+    for (const key of driftKeys) {
+      const def = await findDefinition(agencyId, key);
       if (def) return def;
     }
     return null;
@@ -98,22 +98,27 @@ export async function matchWorkflow(
  *   - GW/Entra + identity + identity_missing          → flag-missing-*-identity
  *   - GW/Entra + identity + identity_inactive         → flag-inactive-*-identity
  *   - GW/Entra + orphan + orphan_in_federation        → flag-orphan-*-identity
+ *   - platform_grant + UNAUTHORIZED_*                 → drift-flag-{platform}-audit-event
+ *                                                       then drift-flag-platform-audit-event (generic)
  *
  * Users on GW/Entra are filtered by the autonomy matrix before we're called
  * (JML owns them).
+ *
+ * Returns a prioritized list of template keys. The caller tries each in order
+ * and uses the first one that resolves to an existing definition.
  */
-function resolveDriftTemplateKey(context: Record<string, unknown>): string | null {
+function resolveDriftTemplateKeys(context: Record<string, unknown>): string[] {
   const pluginKey = context.sourcePluginKey as string | undefined;
   const principalType = context.principalType as string | undefined;
   const driftType = context.driftType as string | undefined;
 
-  if (pluginKey === 'local-directory') return 'drift-link-keycloak-identity';
+  if (pluginKey === 'local-directory') return ['drift-link-keycloak-identity'];
 
   if (pluginKey === 'google-workspace' && principalType === 'synthetic_identity') {
-    return 'drift-recreate-gws-synthetic-identity';
+    return ['drift-recreate-gws-synthetic-identity'];
   }
   if (pluginKey === 'entra-id' && principalType === 'synthetic_identity') {
-    return 'drift-recreate-entra-synthetic-identity';
+    return ['drift-recreate-entra-synthetic-identity'];
   }
 
   if (
@@ -121,14 +126,14 @@ function resolveDriftTemplateKey(context: Record<string, unknown>): string | nul
     principalType === 'identity' &&
     driftType === 'identity_missing'
   ) {
-    return 'drift-flag-missing-gws-identity';
+    return ['drift-flag-missing-gws-identity'];
   }
   if (
     pluginKey === 'entra-id' &&
     principalType === 'identity' &&
     driftType === 'identity_missing'
   ) {
-    return 'drift-flag-missing-entra-identity';
+    return ['drift-flag-missing-entra-identity'];
   }
 
   if (
@@ -136,14 +141,14 @@ function resolveDriftTemplateKey(context: Record<string, unknown>): string | nul
     principalType === 'identity' &&
     driftType === 'identity_inactive'
   ) {
-    return 'drift-flag-inactive-gws-identity';
+    return ['drift-flag-inactive-gws-identity'];
   }
   if (
     pluginKey === 'entra-id' &&
     principalType === 'identity' &&
     driftType === 'identity_inactive'
   ) {
-    return 'drift-flag-inactive-entra-identity';
+    return ['drift-flag-inactive-entra-identity'];
   }
 
   if (
@@ -151,17 +156,33 @@ function resolveDriftTemplateKey(context: Record<string, unknown>): string | nul
     principalType === 'orphan' &&
     driftType === 'orphan_in_federation'
   ) {
-    return 'drift-flag-orphan-gws-identity';
+    return ['drift-flag-orphan-gws-identity'];
   }
   if (
     pluginKey === 'entra-id' &&
     principalType === 'orphan' &&
     driftType === 'orphan_in_federation'
   ) {
-    return 'drift-flag-orphan-entra-identity';
+    return ['drift-flag-orphan-entra-identity'];
   }
 
-  return null;
+  // Platform-audit drift fallback (any platform, any UNAUTHORIZED_* driftType).
+  // Per-platform plugins can register more specific templates that take
+  // precedence — see `drift-flag-{platform}-audit-event` convention.
+  // The generic `drift-flag-platform-audit-event` is the catch-all.
+  if (
+    principalType === 'platform_grant' &&
+    (driftType === 'UNAUTHORIZED_GRANT' || driftType === 'UNAUTHORIZED_REVOKE')
+  ) {
+    const candidates: string[] = [];
+    if (pluginKey) {
+      candidates.push(`drift-flag-${pluginKey}-audit-event`);
+    }
+    candidates.push('drift-flag-platform-audit-event');
+    return candidates;
+  }
+
+  return [];
 }
 
 /**
@@ -198,7 +219,7 @@ function matchesRule(
  */
 function mapLegacyApprovalMode(mode: string | undefined, triggerType: string): string {
   if (triggerType === 'breakglass') return 'emergency';
-  // Drift events are handled above by `resolveDriftTemplateKey` — this
+  // Drift events are handled above by `resolveDriftTemplateKeys` — this
   // helper only covers non-drift fallbacks now.
 
   switch (mode) {
