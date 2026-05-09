@@ -13,6 +13,7 @@ import type { PluginRemediationModule } from '../../common/remediation-contract.
 import { recreateSyntheticIdentityHandler } from './handlers/recreate-synthetic-identity.js';
 import { flagMissingIdentityHandler } from './handlers/flag-missing-identity.js';
 import { flagInactiveIdentityHandler } from './handlers/flag-inactive-identity.js';
+import { flagFederationOrphanHandler } from './handlers/flag-federation-orphan.js';
 
 export const PLUGIN_KEY = 'entra-id';
 
@@ -22,6 +23,7 @@ const entraIdRemediations: PluginRemediationModule = {
     'entra-id:recreate_synthetic_identity': recreateSyntheticIdentityHandler,
     'entra-id:flag_missing_identity': flagMissingIdentityHandler,
     'entra-id:flag_inactive_identity': flagInactiveIdentityHandler,
+    'entra-id:flag_federation_orphan': flagFederationOrphanHandler,
   },
   templates: [
     {
@@ -104,6 +106,31 @@ const entraIdRemediations: PluginRemediationModule = {
           type: 'action',
           config: {
             actionType: 'entra-id:flag_inactive_identity',
+            params: {},
+          },
+          next: null,
+        },
+      ],
+    },
+    {
+      key: 'drift-flag-orphan-entra-identity',
+      name: 'Drift — Flag Entra ID Federation Orphan',
+      description:
+        'Flags a provider user who exists in an Entra ID federated domain but has no AccessHive identity record. Publishes an audit event and notifies admins for manual disposition. Does not auto-create an identity, auto-revoke grants, or delete anything.',
+      trigger_type: 'drift.detected',
+      tier: 'free',
+      steps: [
+        {
+          id: 'step-1',
+          type: 'trigger',
+          config: { eventType: 'drift.detected' },
+          next: 'step-2',
+        },
+        {
+          id: 'step-2',
+          type: 'action',
+          config: {
+            actionType: 'entra-id:flag_federation_orphan',
             params: {},
           },
           next: null,
