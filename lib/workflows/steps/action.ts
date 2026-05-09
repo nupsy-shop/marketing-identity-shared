@@ -21,6 +21,7 @@
 
 import { getRuntime } from '../../runtime.js';
 import { publishAuditEvent } from '../../audit/publisher.js';
+import { dispatchNotification } from '../../notifications/dispatch.js';
 import { getRemediationHandler } from '../../../plugins/identity/remediations-registry.js';
 import type { StepDefinition, WorkflowContext, WorkflowInstance, StepExecutionResult } from '../types.js';
 
@@ -271,6 +272,62 @@ const actionHandlers: Record<string, ActionHandler> = {
       actionType: 'restore_before_state',
       executedAt: new Date().toISOString(),
       reprovision,
+    };
+  },
+
+  /**
+   * Flag a platform-audit drift event and notify admins for manual review.
+   *
+   * Generic catch-all for UNAUTHORIZED_GRANT / UNAUTHORIZED_REVOKE across
+   * any platform without a plugin-specific override template. Publishes an
+   * audit event and dispatches an in-app (+ configured channel) notification.
+   * Does NOT auto-revoke or auto-restore — Option B / flag-and-notify posture.
+   *
+   * Per-platform plugins can override this by registering a template keyed
+   * as `drift-flag-{pluginKey}-audit-event` — the rule-matcher tries those
+   * first (priority order in `resolveDriftTemplateKeys`).
+   */
+  flag_platform_audit_event: async (_params, context, instance) => {
+    const triggerCtx = (context.trigger ?? {}) as Record<string, unknown>;
+    const sourcePluginKey = triggerCtx.sourcePluginKey as string | undefined;
+    const driftType = triggerCtx.driftType as string | undefined;
+    const userEmail = triggerCtx.userEmail as string | undefined;
+    const resource = triggerCtx.resource as
+      | { type?: string; id?: string; name?: string }
+      | undefined;
+    const severity = (triggerCtx.severity as string | undefined) === 'critical' ? 'critical' : 'warning';
+
+    publishAuditEvent({
+      eventType: 'platform.drift.flagged',
+      source: 'accesshive',
+      severity,
+      actor: { id: 'system', type: 'system' },
+      agency: { id: instance.agency_id },
+      resource,
+      context: {
+        sourcePluginKey,
+        driftType,
+        userEmail,
+        workflowInstanceId: instance.id,
+        flaggedAt: new Date().toISOString(),
+      },
+    }).catch(() => {});
+
+    dispatchNotification(instance.agency_id, 'platform.drift.flagged', {
+      principal: userEmail,
+      title: 'Platform audit drift detected',
+      body: `Unauthorized ${driftType ?? 'access change'} detected on platform "${sourcePluginKey ?? 'unknown'}"${userEmail ? ` for ${userEmail}` : ''}. Admin disposition required.`,
+      severity,
+      sourcePluginKey,
+      driftType,
+      userEmail,
+    }).catch(() => {});
+
+    return {
+      actionCompleted: true,
+      actionType: 'flag_platform_audit_event',
+      executedAt: new Date().toISOString(),
+      flaggedDrift: { sourcePluginKey, driftType, userEmail, severity },
     };
   },
 

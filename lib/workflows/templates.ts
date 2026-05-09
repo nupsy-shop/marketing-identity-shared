@@ -8,6 +8,7 @@
 import { getRuntime } from '../runtime.js';
 import { Prisma } from '@prisma/client';
 import { getAllRemediationTemplates } from '../../plugins/identity/remediations-registry.js';
+import { getAllPlatformRemediationTemplates } from '../../plugins/platforms/remediations-registry.js';
 import type { SystemTemplate, TemplateTier, WorkflowDefinition } from './types.js';
 
 // ---- Central Template Definitions -----------------------------------------
@@ -221,6 +222,18 @@ const CENTRAL_TEMPLATES: SystemTemplate[] = [
       },
     ],
   },
+  {
+    key: 'drift-flag-platform-audit-event',
+    name: 'Drift — Flag Platform-Audit Event',
+    description:
+      'Generic flag-and-notify for platform-audit drift events (UNAUTHORIZED_GRANT / UNAUTHORIZED_REVOKE) on any platform without a plugin-specific template. Publishes an audit event and notifies admins for manual review. Does NOT auto-revoke or auto-restore.',
+    trigger_type: 'drift.detected',
+    tier: 'free',
+    steps: [
+      { id: 'step-1', type: 'trigger', config: { eventType: 'drift.detected' }, next: 'step-2' },
+      { id: 'step-2', type: 'action', config: { actionType: 'flag_platform_audit_event', params: {} }, next: null },
+    ],
+  },
 ];
 
 // ---- Composed System Templates --------------------------------------------
@@ -234,6 +247,7 @@ const CENTRAL_TEMPLATES: SystemTemplate[] = [
 export const SYSTEM_TEMPLATES: SystemTemplate[] = [
   ...CENTRAL_TEMPLATES,
   ...(getAllRemediationTemplates() as unknown as SystemTemplate[]),
+  ...(getAllPlatformRemediationTemplates() as unknown as SystemTemplate[]),
 ];
 
 // ---- Seed Function ---------------------------------------------------------
