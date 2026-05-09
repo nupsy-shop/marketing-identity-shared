@@ -1,27 +1,48 @@
 /**
  * Google Tag Manager Platform — Plugin Remediation Module
  *
- * Registers a platform-specific drift template for gtm audit events.
- * Currently reuses the central `flag_platform_audit_event` action handler —
- * no custom gtm-specific action implementation in this PR. Follow-up PR
- * can replace this with `gtm:revoke_*` handlers via the runtime
- * service-locator pattern.
+ * Registers platform-specific drift templates + action handlers for GTM.
  *
- * The template key `drift-flag-gtm-audit-event` is tried BEFORE the
- * generic `drift-flag-platform-audit-event` by the rule-matcher.
+ * Templates registered:
+ *   - `drift-revoke-gtm-grant`     — UNAUTHORIZED_GRANT path. Auto-revokes
+ *     the user permission entry via the runtime service-locator (generic
+ *     wrapper). Falls back to flag-only when the locator is not registered
+ *     (e.g. worker).
+ *   - `drift-flag-gtm-audit-event` — UNAUTHORIZED_REVOKE path (flag-only).
+ *
+ * Rule-matcher routing (resolveDriftTemplateKeys):
+ *   UNAUTHORIZED_GRANT → drift-revoke-gtm-grant → drift-flag-gtm-audit-event → generic
+ *   UNAUTHORIZED_REVOKE → drift-flag-gtm-audit-event → generic (revoke template skipped)
  */
 
 import type { PluginRemediationModule } from '../../../identity/common/remediation-contract.js';
+import { buildPlatformRevokeHandler } from '../../common/build-revoke-handler.js';
+
+const PLUGIN_KEY = 'gtm';
 
 const gtmRemediations: PluginRemediationModule = {
-  pluginKey: 'gtm',
-  actionHandlers: {},
+  pluginKey: PLUGIN_KEY,
+  actionHandlers: {
+    'gtm:revoke_unauthorized_grant': buildPlatformRevokeHandler(PLUGIN_KEY),
+  },
   templates: [
+    {
+      key: 'drift-revoke-gtm-grant',
+      name: 'Drift — GTM Revoke Unauthorized Grant',
+      description:
+        "Auto-revokes a GTM user permission entry granted outside AccessHive. Calls the platform plugin's revokeAccess via the runtime service-locator (generic wrapper). On worker (locator unregistered) or any failure, falls back to flag-and-notify behavior.",
+      trigger_type: 'drift.detected',
+      tier: 'free',
+      steps: [
+        { id: 'step-1', type: 'trigger', config: { eventType: 'drift.detected' }, next: 'step-2' },
+        { id: 'step-2', type: 'action', config: { actionType: 'gtm:revoke_unauthorized_grant', params: {} }, next: null },
+      ],
+    },
     {
       key: 'drift-flag-gtm-audit-event',
       name: 'Drift — Google Tag Manager Audit Event Flag',
       description:
-        'Google Tag Manager-specific override of the generic platform-audit drift template. Currently uses the same flag-and-notify action as the generic; serves as a registration point for future Google Tag Manager-specific remediation.',
+        'Google Tag Manager-specific override of the generic platform-audit drift template. Used for the UNAUTHORIZED_REVOKE path (flag-and-notify, no auto-restore). Also serves as the fallback if drift-revoke-gtm-grant is not found. Uses the central flag_platform_audit_event action handler.',
       trigger_type: 'drift.detected',
       tier: 'free',
       steps: [
