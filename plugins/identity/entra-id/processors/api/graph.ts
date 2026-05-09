@@ -77,3 +77,44 @@ export async function removeMember(
   );
   if (!res.ok) await handleGraphError(res);
 }
+
+export interface CreateEntraUserPayload {
+  userPrincipalName: string;
+  displayName: string;
+  mailNickname: string;
+  accountEnabled: boolean;
+  passwordProfile: {
+    password: string;
+    forceChangePasswordNextSignIn: boolean;
+  };
+}
+
+export interface CreatedEntraUser {
+  id: string;
+  userPrincipalName: string;
+  displayName: string;
+}
+
+/**
+ * POST /users — create a new Entra ID user.
+ *
+ * Returns the created user object (Graph returns the user directly with no
+ * `.value` wrapper on a POST /users response).
+ *
+ * Requires User.ReadWrite.All scope on the access token.
+ */
+export async function createUser(
+  accessToken: string,
+  payload: CreateEntraUserPayload,
+): Promise<CreatedEntraUser> {
+  const res = await fetch(`${GRAPH_BASE}/users`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) await handleGraphError(res);
+  return res.json() as Promise<CreatedEntraUser>;
+}
