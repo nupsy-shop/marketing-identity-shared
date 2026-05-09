@@ -6,6 +6,7 @@ export default {
   entra_poll_audit: () => import('./entra-poll-audit.js'),
   entra_sync_directory: () => import('./entra-sync-directory.js'),
   entra_disconnect: () => import('./entra-disconnect.js'),
+  entra_create_user: () => import('./entra-create-user.js'),
 };
 
 export const concurrency = {
@@ -16,4 +17,5 @@ export const concurrency = {
   entra_poll_audit: 1,
   entra_sync_directory: 1,
   entra_disconnect: 1,
+  entra_create_user: 1,
 };
