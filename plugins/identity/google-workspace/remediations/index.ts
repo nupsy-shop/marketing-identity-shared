@@ -13,6 +13,7 @@
 import type { PluginRemediationModule } from '../../common/remediation-contract.js';
 import { recreateSyntheticIdentityHandler } from './handlers/recreate-synthetic-identity.js';
 import { flagMissingIdentityHandler } from './handlers/flag-missing-identity.js';
+import { flagInactiveIdentityHandler } from './handlers/flag-inactive-identity.js';
 
 export const PLUGIN_KEY = 'google-workspace';
 
@@ -21,6 +22,7 @@ const googleWorkspaceRemediations: PluginRemediationModule = {
   actionHandlers: {
     'google-workspace:recreate_synthetic_identity': recreateSyntheticIdentityHandler,
     'google-workspace:flag_missing_identity': flagMissingIdentityHandler,
+    'google-workspace:flag_inactive_identity': flagInactiveIdentityHandler,
   },
   templates: [
     {
@@ -79,6 +81,31 @@ const googleWorkspaceRemediations: PluginRemediationModule = {
             templateKey: 'drift_remediation_completed',
             recipientType: 'role',
             recipientRole: 'admin',
+          },
+          next: null,
+        },
+      ],
+    },
+    {
+      key: 'drift-flag-inactive-gws-identity',
+      name: 'Drift — Flag Inactive Google Workspace Human Identity',
+      description:
+        'Flags a HUMAN_INTERACTIVE identity whose account exists in the GWS directory cache but is admin-disabled (is_active=false). Sets provisioning_status to inactive and notifies admins for manual review. Does not auto-revoke grants or delete the identity.',
+      trigger_type: 'drift.detected',
+      tier: 'free',
+      steps: [
+        {
+          id: 'step-1',
+          type: 'trigger',
+          config: { eventType: 'drift.detected' },
+          next: 'step-2',
+        },
+        {
+          id: 'step-2',
+          type: 'action',
+          config: {
+            actionType: 'google-workspace:flag_inactive_identity',
+            params: {},
           },
           next: null,
         },

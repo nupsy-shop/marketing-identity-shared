@@ -91,11 +91,12 @@ export async function matchWorkflow(
 }
 
 /**
- * Default drift-template mapping (issues #90, #89, identity_missing).
+ * Default drift-template mapping (issues #90, #89, identity_missing, identity_inactive).
  * Matches the autonomy matrix:
- *   - Local Directory + identity              → link-keycloak-identity
- *   - GW/Entra + synthetic_identity           → recreate-*-synthetic-identity
- *   - GW/Entra + identity + identity_missing  → flag-missing-*-identity
+ *   - Local Directory + identity               → link-keycloak-identity
+ *   - GW/Entra + synthetic_identity            → recreate-*-synthetic-identity
+ *   - GW/Entra + identity + identity_missing   → flag-missing-*-identity
+ *   - GW/Entra + identity + identity_inactive  → flag-inactive-*-identity
  *
  * Users on GW/Entra are filtered by the autonomy matrix before we're called
  * (JML owns them).
@@ -127,6 +128,21 @@ function resolveDriftTemplateKey(context: Record<string, unknown>): string | nul
     driftType === 'identity_missing'
   ) {
     return 'drift-flag-missing-entra-identity';
+  }
+
+  if (
+    pluginKey === 'google-workspace' &&
+    principalType === 'identity' &&
+    driftType === 'identity_inactive'
+  ) {
+    return 'drift-flag-inactive-gws-identity';
+  }
+  if (
+    pluginKey === 'entra-id' &&
+    principalType === 'identity' &&
+    driftType === 'identity_inactive'
+  ) {
+    return 'drift-flag-inactive-entra-identity';
   }
 
   return null;
