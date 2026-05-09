@@ -158,6 +158,7 @@ export const JOB_CATALOG = {
   identity_sync:  { queue: QUEUE_NAMES.BULK_OPS },
   bulk_provision: { queue: QUEUE_NAMES.BULK_OPS },
   bulk_revoke:    { queue: QUEUE_NAMES.BULK_OPS },
+  audit_export:   { queue: QUEUE_NAMES.BULK_OPS },
 
   // ─── System (no tenantId) ───────────────────────────────────────────
   dispatch_poll_audits:       { queue: QUEUE_NAMES.SYSTEM },
