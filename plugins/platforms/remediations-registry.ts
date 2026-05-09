@@ -29,6 +29,11 @@ import type {
   RemediationActionHandler,
 } from '../identity/common/remediation-contract.js';
 import ga4Remediations from './ga4/remediations/index.js';
+import googleAdsRemediations from './google-ads/remediations/index.js';
+import gtmRemediations from './gtm/remediations/index.js';
+import hubspotRemediations from './hubspot/remediations/index.js';
+import metaRemediations from './meta/remediations/index.js';
+import salesforceRemediations from './salesforce/remediations/index.js';
 
 /** Custom error thrown on any registry validation failure. */
 export class PlatformRemediationRegistrationError extends Error {
@@ -49,6 +54,11 @@ const NAMESPACED_RE = /^[a-z][a-z0-9-]*:[a-z][a-z0-9_]*$/;
  */
 const REGISTERED_PLATFORM_PLUGINS: PluginRemediationModule[] = [
   ga4Remediations,
+  googleAdsRemediations,
+  gtmRemediations,
+  hubspotRemediations,
+  metaRemediations,
+  salesforceRemediations,
 ];
 
 interface PlatformRegistryState {
