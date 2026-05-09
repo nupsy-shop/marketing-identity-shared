@@ -12,6 +12,7 @@
 import type { PluginRemediationModule } from '../../common/remediation-contract.js';
 import { recreateSyntheticIdentityHandler } from './handlers/recreate-synthetic-identity.js';
 import { flagMissingIdentityHandler } from './handlers/flag-missing-identity.js';
+import { flagInactiveIdentityHandler } from './handlers/flag-inactive-identity.js';
 
 export const PLUGIN_KEY = 'entra-id';
 
@@ -20,6 +21,7 @@ const entraIdRemediations: PluginRemediationModule = {
   actionHandlers: {
     'entra-id:recreate_synthetic_identity': recreateSyntheticIdentityHandler,
     'entra-id:flag_missing_identity': flagMissingIdentityHandler,
+    'entra-id:flag_inactive_identity': flagInactiveIdentityHandler,
   },
   templates: [
     {
@@ -78,6 +80,31 @@ const entraIdRemediations: PluginRemediationModule = {
             templateKey: 'drift_remediation_completed',
             recipientType: 'role',
             recipientRole: 'admin',
+          },
+          next: null,
+        },
+      ],
+    },
+    {
+      key: 'drift-flag-inactive-entra-identity',
+      name: 'Drift — Flag Inactive Entra ID Human Identity',
+      description:
+        'Flags a HUMAN_INTERACTIVE identity whose account exists in the Entra ID directory cache (is_present_in_idp=true) but is admin-disabled (is_active=false). Sets provisioning_status to inactive and notifies admins for manual review. Does not auto-revoke grants or delete the identity.',
+      trigger_type: 'drift.detected',
+      tier: 'free',
+      steps: [
+        {
+          id: 'step-1',
+          type: 'trigger',
+          config: { eventType: 'drift.detected' },
+          next: 'step-2',
+        },
+        {
+          id: 'step-2',
+          type: 'action',
+          config: {
+            actionType: 'entra-id:flag_inactive_identity',
+            params: {},
           },
           next: null,
         },
