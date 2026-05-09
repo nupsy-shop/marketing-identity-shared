@@ -14,6 +14,7 @@ import type { PluginRemediationModule } from '../../common/remediation-contract.
 import { recreateSyntheticIdentityHandler } from './handlers/recreate-synthetic-identity.js';
 import { flagMissingIdentityHandler } from './handlers/flag-missing-identity.js';
 import { flagInactiveIdentityHandler } from './handlers/flag-inactive-identity.js';
+import { flagFederationOrphanHandler } from './handlers/flag-federation-orphan.js';
 
 export const PLUGIN_KEY = 'google-workspace';
 
@@ -23,6 +24,7 @@ const googleWorkspaceRemediations: PluginRemediationModule = {
     'google-workspace:recreate_synthetic_identity': recreateSyntheticIdentityHandler,
     'google-workspace:flag_missing_identity': flagMissingIdentityHandler,
     'google-workspace:flag_inactive_identity': flagInactiveIdentityHandler,
+    'google-workspace:flag_federation_orphan': flagFederationOrphanHandler,
   },
   templates: [
     {
@@ -105,6 +107,31 @@ const googleWorkspaceRemediations: PluginRemediationModule = {
           type: 'action',
           config: {
             actionType: 'google-workspace:flag_inactive_identity',
+            params: {},
+          },
+          next: null,
+        },
+      ],
+    },
+    {
+      key: 'drift-flag-orphan-gws-identity',
+      name: 'Drift — Flag GWS Federation Orphan',
+      description:
+        'Flags a provider user who exists in the GWS managed OU but has no AccessHive identity record. Publishes an audit event and notifies admins for manual disposition. Does not auto-create an identity, auto-revoke grants, or delete anything.',
+      trigger_type: 'drift.detected',
+      tier: 'free',
+      steps: [
+        {
+          id: 'step-1',
+          type: 'trigger',
+          config: { eventType: 'drift.detected' },
+          next: 'step-2',
+        },
+        {
+          id: 'step-2',
+          type: 'action',
+          config: {
+            actionType: 'google-workspace:flag_federation_orphan',
             params: {},
           },
           next: null,

@@ -91,12 +91,13 @@ export async function matchWorkflow(
 }
 
 /**
- * Default drift-template mapping (issues #90, #89, identity_missing, identity_inactive).
+ * Default drift-template mapping (issues #90, #89, identity_missing, identity_inactive, orphan_in_federation).
  * Matches the autonomy matrix:
- *   - Local Directory + identity               → link-keycloak-identity
- *   - GW/Entra + synthetic_identity            → recreate-*-synthetic-identity
- *   - GW/Entra + identity + identity_missing   → flag-missing-*-identity
- *   - GW/Entra + identity + identity_inactive  → flag-inactive-*-identity
+ *   - Local Directory + identity                       → link-keycloak-identity
+ *   - GW/Entra + synthetic_identity                   → recreate-*-synthetic-identity
+ *   - GW/Entra + identity + identity_missing          → flag-missing-*-identity
+ *   - GW/Entra + identity + identity_inactive         → flag-inactive-*-identity
+ *   - GW/Entra + orphan + orphan_in_federation        → flag-orphan-*-identity
  *
  * Users on GW/Entra are filtered by the autonomy matrix before we're called
  * (JML owns them).
@@ -143,6 +144,21 @@ function resolveDriftTemplateKey(context: Record<string, unknown>): string | nul
     driftType === 'identity_inactive'
   ) {
     return 'drift-flag-inactive-entra-identity';
+  }
+
+  if (
+    pluginKey === 'google-workspace' &&
+    principalType === 'orphan' &&
+    driftType === 'orphan_in_federation'
+  ) {
+    return 'drift-flag-orphan-gws-identity';
+  }
+  if (
+    pluginKey === 'entra-id' &&
+    principalType === 'orphan' &&
+    driftType === 'orphan_in_federation'
+  ) {
+    return 'drift-flag-orphan-entra-identity';
   }
 
   return null;
