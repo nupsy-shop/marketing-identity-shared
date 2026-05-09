@@ -13,6 +13,7 @@
 import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
+import { resolveEntraAccessToken } from './resolve-access-token.js';
 import {
   fetchUsers,
   fetchGroups,
@@ -35,8 +36,6 @@ interface SyncStats {
   groupsUpserted: number;
   membershipsProcessed: number;
 }
-
-const MSFT_TOKEN_URL = 'https://login.microsoftonline.com';
 
 export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResult> {
   const { tenantId } = job.data;
@@ -106,7 +105,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     }
 
     // 2. Resolve access token via client credentials
-    const accessToken = await resolveAccessToken(prisma, source, logger);
+    const accessToken = await resolveEntraAccessToken(prisma, source, logger);
     if (!accessToken) {
       throw new Error('Could not obtain Entra ID access token — check client credentials');
     }
@@ -601,156 +600,5 @@ async function autoLinkByEmail(prisma: any, sourceId: string): Promise<void> {
         data: { is_active: true },
       });
     }
-  }
-}
-
-// ─── Token Resolution ────────────────────────────────────────────────────────
-
-async function resolveAccessToken(
-  prisma: any,
-  source: any,
-  logger: any,
-): Promise<string | null> {
-  const config = (source.connection_config || {}) as Record<string, unknown>;
-
-  // Prefer OAuth token if stored (delegated flow)
-  if (source.oauth_token_id) {
-    const token = await prisma.oauth_tokens.findUnique({
-      where: { id: source.oauth_token_id },
-    });
-
-    if (token && token.isActive !== false) {
-      const expiresAt = token.expiresAt ? new Date(token.expiresAt).getTime() : 0;
-      const isExpired = Date.now() > expiresAt - 5 * 60 * 1000;
-
-      if (!isExpired) return token.accessToken;
-
-      // Attempt token refresh if refresh token available
-      if (token.refreshToken) {
-        const refreshed = await refreshOAuthToken(prisma, token, logger);
-        if (refreshed) return refreshed;
-      }
-
-      logger.warn('entra_sync_directory: OAuth token expired and could not be refreshed', {
-        tokenId: token.id,
-      });
-      // Fall through to client credentials
-    }
-  }
-
-  // Client credentials flow
-  const msftTenantId = config.tenantId as string | undefined;
-  const clientId =
-    (config.clientId as string) ||
-    process.env.ENTRA_ID_CLIENT_ID ||
-    process.env.MICROSOFT_CLIENT_ID;
-  const clientSecret =
-    (config.clientSecret as string) ||
-    process.env.ENTRA_ID_CLIENT_SECRET ||
-    process.env.MICROSOFT_CLIENT_SECRET;
-
-  if (!msftTenantId || !clientId || !clientSecret) {
-    logger.error(
-      'entra_sync_directory: missing client credentials (tenantId, clientId, clientSecret)',
-    );
-    return null;
-  }
-
-  try {
-    const res = await fetch(`${MSFT_TOKEN_URL}/${encodeURIComponent(msftTenantId)}/oauth2/v2.0/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: clientId,
-        client_secret: clientSecret,
-        scope: 'https://graph.microsoft.com/.default',
-      }),
-    });
-
-    if (!res.ok) {
-      let errorText = '';
-      try { errorText = await res.text(); } catch { /* ignore */ }
-      logger.error('entra_sync_directory: client credentials token request failed', {
-        status: res.status,
-        error: errorText.slice(0, 300),
-      });
-      return null;
-    }
-
-    const data = (await res.json()) as { access_token: string; expires_in?: number };
-    return data.access_token;
-  } catch (err) {
-    logger.error('entra_sync_directory: token request error', {
-      error: (err as Error).message,
-    });
-    return null;
-  }
-}
-
-async function refreshOAuthToken(
-  prisma: any,
-  token: any,
-  logger: any,
-): Promise<string | null> {
-  // Entra OAuth refresh requires tenantId from the token or env
-  const tenantId =
-    (token.metadata as any)?.tenantId ||
-    process.env.ENTRA_ID_TENANT_ID ||
-    process.env.MICROSOFT_TENANT_ID;
-  const clientId =
-    (token.metadata as any)?.clientId ||
-    process.env.ENTRA_ID_CLIENT_ID ||
-    process.env.MICROSOFT_CLIENT_ID;
-  const clientSecret =
-    process.env.ENTRA_ID_CLIENT_SECRET || process.env.MICROSOFT_CLIENT_SECRET;
-
-  if (!tenantId || !clientId || !clientSecret) return null;
-
-  try {
-    const res = await fetch(`${MSFT_TOKEN_URL}/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: token.refreshToken,
-        client_id: clientId,
-        client_secret: clientSecret,
-        scope: 'https://graph.microsoft.com/.default',
-      }),
-    });
-
-    if (!res.ok) {
-      let errorText = '';
-      try { errorText = await res.text(); } catch { /* ignore */ }
-      logger.error('entra_sync_directory: OAuth token refresh failed', {
-        tokenId: token.id,
-        status: res.status,
-        error: errorText.slice(0, 300),
-      });
-      return null;
-    }
-
-    const data = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
-    const newExpiresAt = data.expires_in
-      ? new Date(Date.now() + data.expires_in * 1000)
-      : null;
-
-    await prisma.oauth_tokens.update({
-      where: { id: token.id },
-      data: {
-        accessToken: data.access_token,
-        expiresAt: newExpiresAt,
-        ...(data.refresh_token ? { refreshToken: data.refresh_token } : {}),
-        updatedAt: new Date(),
-      },
-    });
-
-    return data.access_token;
-  } catch (err) {
-    logger.error('entra_sync_directory: OAuth refresh error', {
-      error: (err as Error).message,
-    });
-    return null;
   }
 }
