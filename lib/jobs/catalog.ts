@@ -15,7 +15,8 @@
  *   automation      — cron-driven polling and chained automation.
  *                     Tenant-scoped; fans out per agency.
  *                     (entra_poll_audit, gws_poll_audit,
- *                     detect_drift, detect_principal_drift, enforce_retention,
+ *                     detect_drift, detect_principal_drift,
+ *                     maintain_drift_remediations, enforce_retention,
  *                     discover_assets, jml_process_lifecycle)
  *
  *   directory-sync  — directory state reconciliation from upstream IdPs.
@@ -82,6 +83,11 @@ export const JOB_CATALOG = {
   jumpcloud_poll_audit:       { queue: QUEUE_NAMES.AUTOMATION },
   detect_drift:               { queue: QUEUE_NAMES.AUTOMATION },
   detect_principal_drift:     { queue: QUEUE_NAMES.AUTOMATION },
+  // issue #31 — drift maintenance cron. Per-agency worker that scans
+  // pending drift_findings and routes each through evaluateAndRemediate
+  // (the same governance chain the workflow engine uses). B-gate is
+  // honoured; gated tenants are skipped + audit-logged. Idempotent.
+  maintain_drift_remediations: { queue: QUEUE_NAMES.AUTOMATION },
   enforce_retention:          { queue: QUEUE_NAMES.AUTOMATION },
   discover_assets:            { queue: QUEUE_NAMES.AUTOMATION },
   jml_detect_lifecycle:       { queue: QUEUE_NAMES.AUTOMATION },
@@ -149,6 +155,21 @@ export const JOB_CATALOG = {
   // bull-side registers a logging stub that completes until wired.
   rotate_credential_for_identity: { queue: QUEUE_NAMES.PROVISIONING },
 
+  // issue #41 — client offboarding Phase 2. Each step is idempotent,
+  // tagged with `offboardingRunId`, owns its `offboarding_run_steps`
+  // row, and emits scoped audits with `cause='client_offboarded'`.
+  // Routed onto provisioning because every handler is a tenant-scoped,
+  // low-volume, write-heavy operation against the same ResourceServer
+  // (the offboarded client). Concurrency=1-per-step is enforced via
+  // `jobId = offboarding-${runId}-${step}` so a Bull retry never
+  // double-fires the destructive write.
+  client_offboard_revoke_access:               { queue: QUEUE_NAMES.PROVISIONING },
+  client_offboard_disable_identities:          { queue: QUEUE_NAMES.PROVISIONING },
+  client_offboard_unassign_team:               { queue: QUEUE_NAMES.PROVISIONING },
+  client_offboard_pause_scim_and_remediation:  { queue: QUEUE_NAMES.PROVISIONING },
+  client_offboard_deny_pending_requests:       { queue: QUEUE_NAMES.PROVISIONING },
+  client_offboard_finalize:                    { queue: QUEUE_NAMES.PROVISIONING },
+
   // ─── Notifications (tenant-scoped) ──────────────────────────────────
   webhook_deliver: { queue: QUEUE_NAMES.NOTIFICATIONS },
   email_send:      { queue: QUEUE_NAMES.NOTIFICATIONS },
@@ -164,6 +185,9 @@ export const JOB_CATALOG = {
   dispatch_poll_audits:       { queue: QUEUE_NAMES.SYSTEM },
   dispatch_detect_drift:              { queue: QUEUE_NAMES.SYSTEM },
   dispatch_detect_principal_drift:    { queue: QUEUE_NAMES.SYSTEM },
+  // issue #31 — fan-out for the drift maintenance cron. One
+  // maintain_drift_remediations child per active agency.
+  dispatch_maintain_drift_remediations: { queue: QUEUE_NAMES.SYSTEM },
   dispatch_enforce_retention:         { queue: QUEUE_NAMES.SYSTEM },
   dispatch_discover_assets:   { queue: QUEUE_NAMES.SYSTEM },
   dispatch_sync_directories:      { queue: QUEUE_NAMES.SYSTEM },
