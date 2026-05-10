@@ -37,7 +37,8 @@ function s3Client(): S3Client {
 
 function bigintReplacer(_k: string, v: unknown): unknown {
   if (typeof v === 'bigint') return v.toString();
-  if (Buffer.isBuffer(v)) return v.toString('base64');
+  // Prisma 7 returns binary columns as Uint8Array (or Buffer); cover both.
+  if (v instanceof Uint8Array) return Buffer.from(v).toString('base64');
   return v;
 }
 

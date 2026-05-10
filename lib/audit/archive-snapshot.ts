@@ -26,7 +26,8 @@ function ymd(d: Date): string {
 
 function bigintReplacer(_key: string, value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString();
-  if (Buffer.isBuffer(value)) return value.toString('base64');
+  // Prisma 7 returns binary columns as Uint8Array (or Buffer); cover both.
+  if (value instanceof Uint8Array) return Buffer.from(value).toString('base64');
   return value;
 }
 
