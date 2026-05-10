@@ -14,12 +14,13 @@ import { getRuntime } from '../runtime.js';
 import { publishAuditEvent } from '../audit/publisher.js';
 import { incrementRateLimit, recordFailure } from './remediation-guards.js';
 import { updateRemediationStatus } from './remediation-records.js';
-import type {
-  RemediationContext,
-  RemediationMode,
-  RemediationPolicy,
-  RemediationRecord,
-  RemediationResult,
+import {
+  DEFAULT_REVERT_WINDOW_HOURS,
+  type RemediationContext,
+  type RemediationMode,
+  type RemediationPolicy,
+  type RemediationRecord,
+  type RemediationResult,
 } from './remediation-types.js';
 
 /** System template keys used when the policy does not override `autoCreateWorkflow`. */
@@ -113,11 +114,35 @@ export async function dispatchWorkflow(
 
     // Application-layer enforcement of the spec's constraint:
     // non-manual remediation rows must carry a workflow_instance_id.
+    //
+    // REDESIGN (#803 spec gap 2): for fully_automatic, if the workflow
+    // completed synchronously within startWorkflow() (single-step templates
+    // like auto-revoke-access that have no approval gate), write back
+    // status=completed, executed_at, and revert_deadline = executed_at + 48h
+    // immediately. If the workflow is still running/waiting, leave the row at
+    // 'executing' as before — a subsequent poll / event will advance it.
+    const executedAt = new Date();
+    const revertDeadline = new Date(
+      executedAt.getTime() + DEFAULT_REVERT_WINDOW_HOURS * 60 * 60 * 1000,
+    );
+    const isFullyAutoCompleted =
+      mode === 'fully_automatic' && workflowInstance.status === 'completed';
+
     await getRuntime().prisma.remediations.update({
       where: { id: remediation.id },
       data: {
-        status: mode === 'fully_automatic' ? 'executing' : 'awaiting_approval',
+        status: isFullyAutoCompleted
+          ? 'completed'
+          : mode === 'fully_automatic'
+            ? 'executing'
+            : 'awaiting_approval',
         workflow_instance_id: workflowInstance.id,
+        ...(isFullyAutoCompleted
+          ? {
+              executed_at: executedAt,
+              revert_deadline: revertDeadline,
+            }
+          : {}),
         updated_at: new Date(),
       },
     });
@@ -135,6 +160,25 @@ export async function dispatchWorkflow(
         templateKey,
       },
     }).catch(() => {});
+
+    // Emit auto_executed audit event when the workflow completed synchronously
+    // for a fully_automatic remediation (#803 spec gap 2).
+    if (isFullyAutoCompleted) {
+      publishAuditEvent({
+        type: 'remediation',
+        action: 'auto_executed',
+        actor: { id: 'system' },
+        agency_id: agencyId,
+        target: { type: 'remediation', id: remediation.id },
+        context: {
+          triggerType,
+          mode,
+          workflowInstanceId: workflowInstance.id,
+          executedAt: executedAt.toISOString(),
+          revertDeadline: revertDeadline.toISOString(),
+        },
+      }).catch(() => {});
+    }
 
     incrementRateLimit(agencyId);
     return {

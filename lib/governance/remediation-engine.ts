@@ -131,21 +131,27 @@ export async function evaluateAndRemediate(
   }
 
   if (await checkCircuitBreaker(agencyId)) {
-    const row = await createRemediationRecord(agencyId, triggerType, context, policy.mode);
-    await persistSuppressedFinding({
-      remediationId: row.id,
-      agencyId,
-      triggerType,
-      resultPayload: {
-        error: 'circuit_breaker_open',
-        code: 'circuit_breaker',
+    // REDESIGN (#803 spec gap 1): short-circuit BEFORE persistence.
+    // Prior behaviour: persisted a `failed` row + called persistSuppressedFinding.
+    // Redesigned behaviour: NO row created; audit event emitted in-flight only.
+    //
+    // BREAKING CHANGE: callers that previously read `result.remediationId`
+    // on a `circuit_breaker_open` result will now receive `null` instead of
+    // a UUID. Callers must not assume a row exists when action='circuit_breaker_open'.
+    publishAuditEvent({
+      type: 'remediation',
+      action: 'circuit_breaker_open',
+      actor: { id: 'system' },
+      agency_id: agencyId,
+      context: {
+        triggerType,
+        reason: 'circuit_breaker',
         threshold: CIRCUIT_BREAKER_THRESHOLD,
       },
-      auditContext: { reason: 'circuit_breaker' },
-    });
+    }).catch(() => {});
     return {
       action: 'circuit_breaker_open',
-      remediationId: row.id,
+      // BREAKING CHANGE (#803): remediationId is explicitly absent — no row was persisted.
       reason: 'circuit_breaker',
     };
   }
