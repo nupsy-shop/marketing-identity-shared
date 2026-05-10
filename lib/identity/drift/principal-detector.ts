@@ -116,6 +116,18 @@ export async function upsertAndDedupe(
       continue;
     }
 
+    // PR 5c — skip dismissed findings: they stay visible with a "Dismissed"
+    // badge but should NOT be re-flagged on future scans.  Update last_seen_at
+    // so the row doesn't look stale but do NOT emit a transition event.
+    const priorRecord = prior as typeof prior & { dismissed_at?: Date | null };
+    if (priorRecord.dismissed_at != null) {
+      await prisma.drift_findings.update({
+        where: { id: prior.id },
+        data: { last_seen_at: now, updated_at: now },
+      });
+      continue;
+    }
+
     if (prior.state === signal.currentState) {
       // Dedup: same state — refresh liveness only, no emission.
       await prisma.drift_findings.update({
