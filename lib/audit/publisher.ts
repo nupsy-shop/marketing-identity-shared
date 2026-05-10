@@ -81,7 +81,13 @@ function init(): void {
 // ─── Prepare (per-event, in caller's tick) ──────────────────────────────────
 
 function prepareEvent(input: AuditEventPayload): PreparedEvent | null {
-  const agencyId = input.agency?.id ?? input.agency_id ?? null;
+  // Accept all three forms: { agency: { id } }, { agency_id }, { agencyId }.
+  // The bull worker's job-lifecycle audit passes top-level agencyId.
+  const inputAgencyId = (input as Record<string, unknown>).agencyId;
+  const agencyId = input.agency?.id
+    ?? input.agency_id
+    ?? (typeof inputAgencyId === 'string' ? inputAgencyId : null)
+    ?? null;
   if (!agencyId) {
     // System-level (un-chained) events are dropped in Phase-1A. Document
     // this in the runbook; today's existing system-events fall into a
