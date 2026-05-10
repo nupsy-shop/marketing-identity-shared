@@ -170,8 +170,9 @@ async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Prom
   if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   for (let attempt = 0; attempt < MAX_PK_RETRIES; attempt++) {
     try {
-      await prisma.$transaction(async (tx) => {
-        const head = await (tx as any).auditEvent.findFirst({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await prisma.$transaction(async (tx: any) => {
+        const head = await tx.auditEvent.findFirst({
           where:   { agencyId },
           orderBy: { seq: 'desc' },
           select:  { seq: true, eventHash: true },
@@ -195,8 +196,8 @@ async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Prom
           return row;
         });
 
-        await (tx as any).auditEvent.createMany({ data: rows });
-        await (tx as any).auditEsIndexState.createMany({
+        await tx.auditEvent.createMany({ data: rows });
+        await tx.auditEsIndexState.createMany({
           data: rows.map(r => ({ eventId: r.eventId })),
         });
       }, { isolationLevel: 'Serializable' });
@@ -214,14 +215,24 @@ async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Prom
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-export async function publishAuditEvent(input: AuditEventPayload): Promise<void> {
+/**
+ * Phase-1A: returns a handle with the eventId (known at publish time).
+ * eventHash/prevHash are NOT available synchronously — they're computed
+ * at flush time when the chain row is inserted. Callers that need the
+ * hashes (e.g. E2E seed scripts) should call flushAll() and then query
+ * `audit_events` by eventId.
+ *
+ * Returns null when the event was dropped (no agency_id).
+ */
+export async function publishAuditEvent(input: AuditEventPayload): Promise<{ eventId: string } | null> {
   init();
   const prepared = prepareEvent(input);
-  if (!prepared) return;
+  if (!prepared) return null;
   _buffer.push(prepared);
   if (_buffer.length >= BUFFER_SIZE) {
     flush().catch(err => console.error('[Audit] immediate flush error:', (err as Error).message));
   }
+  return { eventId: prepared.eventId };
 }
 
 export async function flushAll(): Promise<void> {
@@ -499,8 +510,13 @@ function mapLegacyEventType(legacyEvent: string): string {
 }
 
 // Notification hook (preserved from prior version, unchanged).
-let _notificationHook: ((...args: unknown[]) => unknown) | null = null;
-export function setNotificationHook(hookFn: (...args: unknown[]) => unknown): void {
+// Uses `any[]` rather than `unknown[]` so callers can pass typed callback
+// functions (TS function-parameter contravariance forbids strict-typed
+// callbacks where `unknown[]` is expected).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _notificationHook: ((...args: any[]) => any) | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function setNotificationHook(hookFn: (...args: any[]) => any): void {
   _notificationHook = hookFn;
 }
 

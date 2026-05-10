@@ -5,8 +5,16 @@
  * The verifier MUST use this exact same library and version, so the
  * canonical bytes are byte-identical on both sides.
  */
-import canonicalize from 'canonicalize';
+// `canonicalize` is a CommonJS package (module.exports = function).
+// NodeNext-mode TypeScript (used by the bull worker) resolves the default
+// import to a namespace object whose call signature isn't visible. The web
+// app (Next.js, ESModule mode with esModuleInterop) and the verifier-cli
+// (CommonJS) handle a default-import directly. Cast through `unknown` to
+// give every consumer a callable function regardless of module mode.
+import canonicalizeMod from 'canonicalize';
 import crypto from 'crypto';
+
+const canonicalize = canonicalizeMod as unknown as (v: unknown) => string | undefined;
 
 export function canonicalizeBody(value: unknown): string {
   const result = canonicalize(value);

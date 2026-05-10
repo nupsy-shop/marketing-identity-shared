@@ -5,7 +5,7 @@
  * an extra durability tier: even if the audit_sth tables are wiped,
  * STH integrity records persist in the WORM bucket.
  */
-import prisma from '@/lib/db/prisma';
+import { getRuntime } from '../runtime.js';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 function getClient(): S3Client {
@@ -34,6 +34,8 @@ function bigintReplacer(_key: string, value: unknown): unknown {
 export async function runArchiveSnapshot(): Promise<void> {
   const Bucket = process.env.AUDIT_BUCKET;
   if (!Bucket) throw new Error('[audit] AUDIT_BUCKET not set');
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   const client = getClient();
 
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -41,8 +43,8 @@ export async function runArchiveSnapshot(): Promise<void> {
   const metaSths = await prisma.auditMetaSth.findMany({ where: { signedAt: { gte: since } } });
 
   const today = ymd(new Date());
-  const sthBody = sths.map(r => JSON.stringify(r, bigintReplacer)).join('\n');
-  const metaBody = metaSths.map(r => JSON.stringify(r, bigintReplacer)).join('\n');
+  const sthBody = sths.map((r: unknown) => JSON.stringify(r, bigintReplacer)).join('\n');
+  const metaBody = metaSths.map((r: unknown) => JSON.stringify(r, bigintReplacer)).join('\n');
 
   const sevenYears = new Date();
   sevenYears.setFullYear(sevenYears.getFullYear() + 7);
