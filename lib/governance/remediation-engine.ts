@@ -106,7 +106,8 @@ export async function evaluateAndRemediate(
   }
 
   // Feature gate — downgrade or reject modes the agency's tier can't serve.
-  const gate = await enforceFeatureGate(agencyId, policy);
+  // Passes triggerType so the fail-closed audit event carries the trigger context.
+  const gate = await enforceFeatureGate(agencyId, policy, triggerType);
   if (gate) return gate;
 
   if (isExcluded(policy, context)) return { action: 'excluded' };
@@ -206,12 +207,59 @@ export async function evaluateAndRemediate(
  * Enforce the agency's entitlement tier. Returns a short-circuit result
  * when the requested mode isn't available; otherwise mutates `policy.mode`
  * in place (semi_automatic fallback) and returns `null` to continue.
+ *
+ * Upstream fail-closed gate (#721): if the entitlement lookup throws OR
+ * returns source='fallback' for a non-manual policy, the engine returns
+ * early without persisting any row — "allow nothing" is the safe default
+ * when we can't confirm entitlements.
  */
 async function enforceFeatureGate(
   agencyId: string,
   policy: RemediationPolicy,
+  triggerType?: string,
 ): Promise<RemediationResult | null> {
-  const entitlements = (await resolveEntitlementsFromDb(agencyId)) as Entitlements;
+  let entitlements: Entitlements & { source?: string };
+
+  try {
+    entitlements = (await resolveEntitlementsFromDb(agencyId)) as Entitlements & {
+      source?: string;
+    };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    publishAuditEvent({
+      type: 'remediation',
+      action: 'entitlement_unavailable',
+      actor: { id: 'system' },
+      agency_id: agencyId,
+      context: {
+        triggerType,
+        mode: policy.mode,
+        reason: 'lago_lookup_failed',
+        error: errMsg,
+      },
+    }).catch(() => {});
+    return { action: 'entitlement_unavailable', reason: 'lago_lookup_failed' };
+  }
+
+  // Fail closed when the resolver fell back to tier-policy defaults — Lago
+  // was unreachable (or no cached data exists) and we cannot confirm that the
+  // agency's current plan allows automated evaluation. Return early BEFORE
+  // any createRemediationRecord call so no row is persisted.
+  if (entitlements.source === 'fallback') {
+    publishAuditEvent({
+      type: 'remediation',
+      action: 'entitlement_unavailable',
+      actor: { id: 'system' },
+      agency_id: agencyId,
+      context: {
+        triggerType,
+        mode: policy.mode,
+        reason: 'lago_fallback',
+      },
+    }).catch(() => {});
+    return { action: 'entitlement_unavailable', reason: 'lago_fallback' };
+  }
+
   const hasAutoRemediation = entitlements.features?.autoRemediation ?? false;
   const hasAutoRemediationFull = entitlements.features?.autoRemediationFull ?? false;
 
