@@ -246,24 +246,43 @@ async function evaluateDriftDetected(
 ): Promise<RemediationResult> {
   const sourcePluginKey = (context.sourcePluginKey as string) || '';
   const principalType = (context.principalType as string) || '';
+  const bypassGate = context._bypassGate === true;
 
   const decision = evaluateAutonomy(sourcePluginKey, principalType);
 
   if (decision.coverage === 'skip') {
-    publishAuditEvent({
-      type: 'remediation',
-      action: 'skipped',
-      actor: { id: 'system' },
-      agency_id: agencyId,
-      context: {
-        triggerType: 'drift.detected',
-        reason: decision.reason,
-        sourcePluginKey,
-        principalType,
-        ...context,
-      },
-    }).catch(() => {});
-    return { action: 'skipped', reason: decision.reason };
+    if (bypassGate) {
+      // Operator has explicitly bypassed the gate. Emit a traceability audit
+      // event and continue to dispatch (rate-limit + circuit-breaker still apply).
+      publishAuditEvent({
+        type: 'remediation',
+        action: 'gate_bypassed',
+        actor: { id: (context._bypassedBy as string | undefined) ?? 'operator' },
+        agency_id: agencyId,
+        context: {
+          findingId: (context._findingId as string | undefined) ?? null,
+          originalGateReason: decision.reason,
+          bypassedBy: (context._bypassedBy as string | undefined) ?? 'operator',
+          sourcePluginKey,
+          principalType,
+        },
+      }).catch(() => {});
+    } else {
+      publishAuditEvent({
+        type: 'remediation',
+        action: 'skipped',
+        actor: { id: 'system' },
+        agency_id: agencyId,
+        context: {
+          triggerType: 'drift.detected',
+          reason: decision.reason,
+          sourcePluginKey,
+          principalType,
+          ...context,
+        },
+      }).catch(() => {});
+      return { action: 'skipped', reason: decision.reason };
+    }
   }
 
   // Reuse the existing `drift` policy shape. Missing policy = manual default.
