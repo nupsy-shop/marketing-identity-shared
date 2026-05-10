@@ -14,11 +14,10 @@
  * (24-hour retention — bundles are ephemeral; user re-requests if expired).
  */
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { create as createTar } from 'tar';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import prisma from '@/lib/db/prisma';
+import { getRuntime } from '../runtime.js';
 import { buildInclusionProof } from './proof.js';
 import { listPublicKeys } from './keys.js';
 import { getAuditBody } from './minio-archive.js';
@@ -43,6 +42,9 @@ function bigintReplacer(_k: string, v: unknown): unknown {
 }
 
 export async function runExportJob(jobId: string): Promise<void> {
+  const { create: createTar } = await import('tar');
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   const job = await prisma.auditExportJob.findUnique({ where: { id: jobId } });
   if (!job) throw new Error(`export job ${jobId} not found`);
   await prisma.auditExportJob.update({ where: { id: jobId }, data: { status: 'building' } });

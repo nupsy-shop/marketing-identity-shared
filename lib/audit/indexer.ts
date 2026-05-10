@@ -14,7 +14,7 @@
  *   - ES index failure: record lastError + rethrow for Bull retry.
  */
 import crypto from 'crypto';
-import prisma from '@/lib/db/prisma';
+import { getRuntime } from '../runtime.js';
 import { getAuditBody } from './minio-archive.js';
 import { indexDocument } from './client.js';
 
@@ -23,6 +23,8 @@ export interface AuditIndexEsPayload {
 }
 
 export async function handleAuditIndexEs(payload: AuditIndexEsPayload): Promise<void> {
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   const row = await prisma.auditEvent.findUnique({
     where: { eventId: payload.eventId },
   });
@@ -67,7 +69,7 @@ export async function handleAuditIndexEs(payload: AuditIndexEsPayload): Promise<
   };
 
   try {
-    await indexDocument(doc as { eventId: string; timestamp: string; [k: string]: unknown }, { refresh: 'false' });
+    await indexDocument(doc as unknown as { eventId: string; timestamp: string; [k: string]: unknown }, { refresh: 'false' });
   } catch (err) {
     await recordIndexError(row.eventId, `es: ${(err as Error).message}`);
     throw err;
@@ -80,6 +82,8 @@ export async function handleAuditIndexEs(payload: AuditIndexEsPayload): Promise<
 }
 
 async function recordIndexError(eventId: string, msg: string): Promise<void> {
+  const { prisma } = getRuntime();
+  if (!prisma) return;
   try {
     await prisma.auditEsIndexState.upsert({
       where: { eventId },
