@@ -64,7 +64,7 @@ export async function requestTimestampToken(opts: RequestTimestampOptions): Prom
   const res = await fetch(opts.tsaUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/timestamp-query' },
-    body,
+    body: new Uint8Array(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

@@ -6,7 +6,7 @@
  * Output shape matches the verifier CLI's expected input. Bigints are
  * rendered as decimal strings; bytes as base64.
  */
-import prisma from '@/lib/db/prisma';
+import { getRuntime } from '../runtime.js';
 import { rfc6962LeafHash, rfc6962MerkleRoot, rfc6962AuditPath } from './merkle.js';
 import { canonicalizeBody, sha256Hex } from './canonicalize.js';
 
@@ -43,6 +43,8 @@ export interface BuildInclusionProofArgs {
 }
 
 export async function buildInclusionProof(args: BuildInclusionProofArgs): Promise<InclusionProof> {
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   const event = await prisma.auditEvent.findUnique({ where: { eventId: args.eventId } });
   if (!event || event.agencyId !== args.agencyId) {
     throw new Error(`event ${args.eventId} not found in agency ${args.agencyId}`);
@@ -63,7 +65,7 @@ export async function buildInclusionProof(args: BuildInclusionProofArgs): Promis
     orderBy: { seq: 'asc' },
     select: { bodySha256: true },
   });
-  const leaves = allLeaves.map(e => rfc6962LeafHash(Buffer.from(e.bodySha256, 'hex')));
+  const leaves = allLeaves.map((e: { bodySha256: string }) => rfc6962LeafHash(Buffer.from(e.bodySha256, 'hex')));
   const leafIdx = Number(event.seq) - 1; // seq is 1-based, leaf array is 0-based
   const auditPath = rfc6962AuditPath(leaves, leafIdx).map(b => b.toString('hex'));
 
@@ -86,7 +88,7 @@ export async function buildInclusionProof(args: BuildInclusionProofArgs): Promis
     orderBy: { leafIndex: 'asc' },
     select: { agencyId: true, treeSize: true, rootHash: true, leafIndex: true },
   });
-  const metaLeafBuffers = allMetaLeaves.map(l => {
+  const metaLeafBuffers = allMetaLeaves.map((l: { agencyId: string; treeSize: bigint; rootHash: string; leafIndex: bigint }) => {
     const content = canonicalizeBody({
       agencyId: l.agencyId,
       treeSize: l.treeSize.toString(),

@@ -11,7 +11,7 @@
  * verifier is for ops dashboards; the customer-facing one is what
  * a regulator inspects.
  */
-import prisma from '@/lib/db/prisma';
+import { getRuntime } from '../runtime.js';
 
 export type BrokenLinkReason = 'prev_hash_mismatch' | 'sequence_gap';
 
@@ -43,6 +43,8 @@ const GENESIS = '0'.repeat(64);
 export const GENESIS_PREV_HASH = GENESIS;
 
 export async function verifyChain(opts: VerifyChainOptions): Promise<VerifyChainResult> {
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   const cap = opts.maxEvents ?? 10_000;
   const where: Record<string, unknown> = { agencyId: opts.agencyId };
   if (opts.dateFrom || opts.dateTo) {
@@ -100,6 +102,8 @@ export async function verifyChain(opts: VerifyChainOptions): Promise<VerifyChain
 
 // Back-compat: old call sites used positional/legacy options. Wrap if needed.
 export async function getLatestEventHashForAgency(agencyId: string): Promise<string | null> {
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   const head = await prisma.auditEvent.findFirst({
     where: { agencyId },
     orderBy: { seq: 'desc' },

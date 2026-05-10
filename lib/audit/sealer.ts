@@ -20,8 +20,7 @@
  * Idempotency: tenant STH PK (agencyId, treeSize) and meta STH PK metaSize
  * make duplicate seals collide harmlessly.
  */
-import prisma from '@/lib/db/prisma';
-import { enqueue } from '@/lib/jobs/enqueue';
+import { getRuntime } from '../runtime.js';
 import { rfc6962LeafHash, rfc6962MerkleRoot } from './merkle.js';
 import { tenantSthMessage, metaSthMessage } from './sth-message.js';
 import { signWithCurrentKey, getCurrentKeyId } from './keys.js';
@@ -29,6 +28,8 @@ import { canonicalizeBody, sha256Hex } from './canonicalize.js';
 import { requestTimestampToken } from './tsa-client.js';
 
 export async function runSealCycle(): Promise<void> {
+  const { prisma, enqueueJob } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   // $queryRaw exception: the "find tenants with new leaves" semantics
   // require a LEFT-anti-join correlated subquery across audit_events
   // and audit_sth that can't be expressed cleanly in Prisma's relation
@@ -147,12 +148,16 @@ export async function runSealCycle(): Promise<void> {
     console.warn(
       `[audit-seal] TSA anchor failed for metaSize=${metaSize}: ${(err as Error).message}`,
     );
-    await enqueue('audit_tsa_retry', { metaSize: metaSize.toString() }).catch(() => {});
+    if (enqueueJob) {
+      await enqueueJob('audit_tsa_retry', { metaSize: metaSize.toString() }).catch(() => {});
+    }
   }
 }
 
 // TSA retry handler (registered as a separate Bull handler).
 export async function handleTsaRetry(payload: { metaSize: string }): Promise<void> {
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   const metaSize = BigInt(payload.metaSize);
   const row = await (prisma as any).auditMetaSth.findUnique({ where: { metaSize } });
   if (!row) return;

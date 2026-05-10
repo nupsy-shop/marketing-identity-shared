@@ -20,9 +20,8 @@
  *     before process exit.
  */
 import crypto from 'crypto';
-import prisma from '@/lib/db/prisma';
 import { Prisma } from '@prisma/client';
-import { enqueueBulk } from '@/lib/jobs/enqueue';
+import { getRuntime } from '../runtime.js';
 import { canonicalizeBody, sha256Hex } from './canonicalize.js';
 import { putAuditBody, auditBodyKey } from './minio-archive.js';
 
@@ -144,9 +143,10 @@ async function flush(): Promise<void> {
   }
 
   // 3. Enqueue ES indexing.
-  await enqueueBulk('audit_index_es', batch.map(e => ({
-    payload: { eventId: e.eventId },
-  })));
+  const { enqueueJob } = getRuntime();
+  if (enqueueJob) {
+    await Promise.all(batch.map(e => enqueueJob('audit_index_es', { eventId: e.eventId })));
+  }
 }
 
 // ─── Chain insert with PK retry ─────────────────────────────────────────────
@@ -166,6 +166,8 @@ function jitterBackoff(attempt: number): Promise<void> {
 }
 
 async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Promise<void> {
+  const { prisma } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
   for (let attempt = 0; attempt < MAX_PK_RETRIES; attempt++) {
     try {
       await prisma.$transaction(async (tx) => {

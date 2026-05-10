@@ -10,12 +10,14 @@
  * project convention (feedback_prisma_only / feedback_no_raw_sql) and requires
  * the FK added in migration 20260509000001_audit_es_index_relation.
  */
-import prisma from '@/lib/db/prisma';
-import { enqueueBulk } from '@/lib/jobs/enqueue';
+import { getRuntime } from '../runtime.js';
 
 const BATCH_SIZE = 1000;
 
 export async function runReconcileBatch(): Promise<void> {
+  const { prisma, enqueueJob } = getRuntime();
+  if (!prisma) throw new Error('[audit] runtime.prisma not registered');
+
   const events = await prisma.auditEvent.findMany({
     where: {
       OR: [
@@ -29,9 +31,9 @@ export async function runReconcileBatch(): Promise<void> {
   });
 
   if (events.length === 0) return;
+  if (!enqueueJob) return;
 
-  await enqueueBulk(
-    'audit_index_es',
-    events.map((e) => ({ payload: { eventId: e.eventId } })),
+  await Promise.all(
+    (events as Array<{ eventId: string }>).map((e) => enqueueJob('audit_index_es', { eventId: e.eventId })),
   );
 }
