@@ -32,7 +32,7 @@
  *     → `needs_reauth` state.
  */
 
-import { getRuntime } from '../runtime.js';
+import { getRuntime } from '../../../lib/runtime.js';
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const PLUGIN_KEY = 'google-workspace';
