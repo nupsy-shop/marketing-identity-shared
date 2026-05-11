@@ -110,8 +110,6 @@ export const JOB_CATALOG = {
   pre_expiry_notify_for_agency:         { queue: QUEUE_NAMES.AUTOMATION },
   // issue #51 — daily automated credential rotation.
   rotate_credentials_for_agency:        { queue: QUEUE_NAMES.AUTOMATION },
-  // issue #54 — every-10-min identity-source health probes.
-  check_connector_health_for_agency:    { queue: QUEUE_NAMES.AUTOMATION },
   // issue #55 — daily contractor contract-expiration notices.
   notify_contract_expirations_for_agency: { queue: QUEUE_NAMES.AUTOMATION },
   // issue #56 — every-10-min access-window boundary events.
@@ -138,6 +136,13 @@ export const JOB_CATALOG = {
   iam_deprovision_app_user:  { queue: QUEUE_NAMES.PROVISIONING },
   gws_create_user:           { queue: QUEUE_NAMES.PROVISIONING },
   gws_suspend_user:          { queue: QUEUE_NAMES.PROVISIONING },
+  // issue #988 — per-plugin connection-state health probe. Replaces the
+  // cross-plugin `check_connector_health_for_agency` (deleted). Each
+  // probe runs the plugin-specific liveness call, evaluates against the
+  // Platform Health enum, and persists the resulting `connection_state`.
+  // Routed onto AUTOMATION (was the home of the deleted cross-plugin
+  // job) so existing concurrency / queue-tier intent is preserved.
+  gws_check_health:          { queue: QUEUE_NAMES.AUTOMATION },
   // Mirror of gws_create_user for Entra ID. Processor at
   // shared/plugins/identity/entra-id/processors/entra-create-user.ts;
   // enqueued by the recreate-synthetic-identity remediation handler.
@@ -146,6 +151,8 @@ export const JOB_CATALOG = {
   // 'entra_create_user'" — fixed here.
   entra_create_user:         { queue: QUEUE_NAMES.PROVISIONING },
   entra_suspend_user:        { queue: QUEUE_NAMES.PROVISIONING },
+  // issue #988 — Entra mirror of gws_check_health. See note above.
+  entra_check_health:        { queue: QUEUE_NAMES.AUTOMATION },
   entra_unsuspend_user:      { queue: QUEUE_NAMES.PROVISIONING },
   entra_add_group_member:    { queue: QUEUE_NAMES.PROVISIONING },
   entra_remove_group_member: { queue: QUEUE_NAMES.PROVISIONING },
