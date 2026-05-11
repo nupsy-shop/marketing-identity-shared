@@ -138,6 +138,13 @@ export const JOB_CATALOG = {
   iam_deprovision_app_user:  { queue: QUEUE_NAMES.PROVISIONING },
   gws_create_user:           { queue: QUEUE_NAMES.PROVISIONING },
   gws_suspend_user:          { queue: QUEUE_NAMES.PROVISIONING },
+  // Mirror of gws_create_user for Entra ID. Processor at
+  // shared/plugins/identity/entra-id/processors/entra-create-user.ts;
+  // enqueued by the recreate-synthetic-identity remediation handler.
+  // The plugin manifest had it registered but the catalog didn't,
+  // so every enqueue failed with "[Jobs] Unknown job type
+  // 'entra_create_user'" — fixed here.
+  entra_create_user:         { queue: QUEUE_NAMES.PROVISIONING },
   entra_suspend_user:        { queue: QUEUE_NAMES.PROVISIONING },
   entra_unsuspend_user:      { queue: QUEUE_NAMES.PROVISIONING },
   entra_add_group_member:    { queue: QUEUE_NAMES.PROVISIONING },
