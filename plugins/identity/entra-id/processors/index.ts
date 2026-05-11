@@ -7,6 +7,7 @@ export default {
   entra_sync_directory: () => import('./entra-sync-directory.js'),
   entra_disconnect: () => import('./entra-disconnect.js'),
   entra_create_user: () => import('./entra-create-user.js'),
+  entra_check_health: () => import('./entra-check-health.js'),
 };
 
 export const concurrency = {
@@ -18,4 +19,5 @@ export const concurrency = {
   entra_sync_directory: 1,
   entra_disconnect: 1,
   entra_create_user: 1,
+  entra_check_health: 1,
 };
