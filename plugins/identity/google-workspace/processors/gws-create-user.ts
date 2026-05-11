@@ -87,6 +87,16 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   }
 
   if (!accessToken) {
+    logger.error(
+      'gws_create_user: no valid OAuth token — agency may need to reconnect',
+      {
+        jobId: String(job.id),
+        tenantId,
+        identityId,
+        sourceId: source.id,
+        oauthTokenId: source.oauth_token_id,
+      },
+    );
     throw new Error('No valid OAuth token for Google Workspace — will retry');
   }
 
@@ -96,7 +106,20 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   const syntheticOrgUnitPath = (provConfig.syntheticOrgUnitPath || connConfig.managedOuPath) as string | undefined;
 
   if (!syntheticOrgUnitPath) {
-    throw new Error('syntheticOrgUnitPath not configured — will retry');
+    logger.error(
+      'gws_create_user: syntheticOrgUnitPath not configured (neither provisioning_config.syntheticOrgUnitPath nor connection_config.managedOuPath is set)',
+      {
+        jobId: String(job.id),
+        tenantId,
+        identityId,
+        sourceId: source.id,
+        provConfigKeys: Object.keys(provConfig),
+        connConfigKeys: Object.keys(connConfig),
+      },
+    );
+    throw new Error(
+      'syntheticOrgUnitPath not configured on Google Workspace identity source — set provisioning_config.syntheticOrgUnitPath or connection_config.managedOuPath',
+    );
   }
 
   // 5. Call GWS Admin API
@@ -143,10 +166,29 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
       }
     }
   } catch (err) {
+    // Log the precise GWS API error with full context BEFORE writing
+    // provider status — without this the failure surfaces only as a
+    // generic "Job failed" line and the operator has to dig into
+    // provisioning_providers_status to find out why (#985).
+    const errMsg = (err as Error).message;
+    logger.error(
+      'gws_create_user: GWS Admin API call failed — see error for upstream cause (most common: 403 insufficient scope, 404 OU not found, 409 user already exists in a different OU)',
+      {
+        jobId: String(job.id),
+        tenantId,
+        identityId,
+        sourceId: source.id,
+        email: resolvedEmail,
+        syntheticOrgUnitPath,
+        oauthTokenId: source.oauth_token_id,
+        err: errMsg,
+      },
+    );
+
     // Update provider status with error
     await updateProviderStatus(prisma, identityId, 'google-workspace', {
       status: ProviderStatus.ERROR,
-      error: (err as Error).message,
+      error: errMsg,
       updatedAt: new Date().toISOString(),
     });
 

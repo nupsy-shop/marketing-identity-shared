@@ -84,6 +84,25 @@ export const recreateSyntheticIdentityHandler: RemediationActionHandler = async 
     platformKey: identity.platform_key,
   });
 
+  // Mirror of the GWS check (#985): silent unenqueued state would
+  // have the workflow record actionCompleted=true while nothing
+  // downstream ever ran. Surface the failure explicitly.
+  if (!jobId) {
+    const { logger } = getRuntime();
+    logger.error(
+      'recreate_synthetic_identity: enqueueJob(entra_create_user) returned null — workflow cannot complete',
+      {
+        tenantId: instance.agency_id,
+        principalId,
+        identityId: identity.id,
+        action: 'entra-id:recreate_synthetic_identity',
+      },
+    );
+    throw new Error(
+      'entra-id:recreate_synthetic_identity: enqueueJob(entra_create_user) returned null — see worker logs for the catalog/queue lookup that failed',
+    );
+  }
+
   return {
     actionCompleted: true,
     actionType: 'entra-id:recreate_synthetic_identity',

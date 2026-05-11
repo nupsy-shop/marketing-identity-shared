@@ -90,6 +90,29 @@ export const recreateSyntheticIdentityHandler: RemediationActionHandler = async 
     platformKey: identity.platform_key,
   });
 
+  // Treat a null jobId as a hard failure — silent unenqueued state
+  // was the bug behind #985. enqueueJob returns null when:
+  //   - the job type isn't in the shared catalog (queueForUnsafe miss)
+  //   - the host's queue instance for the target queue is missing
+  //   - the catalog-routed queue's `add()` rejects (Redis down)
+  // In every case the workflow should surface the failure rather than
+  // record actionCompleted=true with no downstream effect.
+  if (!jobId) {
+    const { logger } = getRuntime();
+    logger.error(
+      'recreate_synthetic_identity: enqueueJob(gws_create_user) returned null — workflow cannot complete',
+      {
+        tenantId: instance.agency_id,
+        principalId,
+        identityId: identity.id,
+        action: 'google-workspace:recreate_synthetic_identity',
+      },
+    );
+    throw new Error(
+      'google-workspace:recreate_synthetic_identity: enqueueJob(gws_create_user) returned null — see worker logs for the catalog/queue lookup that failed',
+    );
+  }
+
   return {
     actionCompleted: true,
     actionType: 'google-workspace:recreate_synthetic_identity',
