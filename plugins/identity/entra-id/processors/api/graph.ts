@@ -83,6 +83,20 @@ export interface CreateEntraUserPayload {
   displayName: string;
   mailNickname: string;
   accountEnabled: boolean;
+  /**
+   * Source-anchor for federated users (Graph requirement).
+   *
+   * Microsoft requires `onPremisesImmutableId` on POST /users whenever the
+   * UPN's domain is configured as federated in the tenant — without it the
+   * create fails with `Request_BadRequest` ("ImmutableId is required ..."),
+   * which is exactly the failure mode that hit synthetic identities created
+   * under an `access.<agency>` federated domain.
+   *
+   * For non-federated domains Graph accepts (and ignores) the field, so we
+   * always set it from the local `integration_identities.id` (a stable UUID)
+   * rather than branching on tenant config.
+   */
+  onPremisesImmutableId?: string;
   passwordProfile: {
     password: string;
     forceChangePasswordNextSignIn: boolean;

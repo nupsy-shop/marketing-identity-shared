@@ -89,6 +89,10 @@ export default async function entraCreateUser(job: Bull.Job): Promise<JobResult>
       displayName: resolvedDisplayName,
       mailNickname,
       accountEnabled: true,
+      // Required by Graph when the UPN's domain is federated; harmless on
+      // non-federated domains. The local identity UUID is stable + unique
+      // per identity, so it is a safe permanent anchor.
+      onPremisesImmutableId: identity.id,
       passwordProfile: {
         password,
         forceChangePasswordNextSignIn: false,
