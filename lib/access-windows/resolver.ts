@@ -81,7 +81,18 @@ export function validateRRule(rrule: string): string | null {
 }
 
 function buildRRule(rruleStr: string): RRule {
-  const parsed = rrulestr(rruleStr) as unknown as RRule | { rrules(): RRule[] };
+  // When the RRULE string has no DTSTART component, rrule.js defaults the
+  // start anchor to `new Date()` — which silently skips every occurrence
+  // before "now". For a recurring grant the past-week window is exactly
+  // what callers (the scheduler, the evaluator at a fake `--at`) need to
+  // see. Anchor DTSTART to the Unix epoch so `between()` walks the whole
+  // RRULE space; the caller's lookback/lookahead bounds do the actual
+  // filtering. Explicit DTSTART lines in the input string take precedence.
+  const hasDtstart = /\bDTSTART\b/i.test(rruleStr);
+  const effective = hasDtstart
+    ? rruleStr
+    : `DTSTART:19700101T000000Z\nRRULE:${rruleStr.replace(/^RRULE:/i, '')}`;
+  const parsed = rrulestr(effective) as unknown as RRule | { rrules(): RRule[] };
   if (parsed instanceof RRule) return parsed;
   const set = parsed as { rrules(): RRule[] };
   const first = set.rrules?.()[0];
@@ -113,14 +124,15 @@ function toLocalIso(date: Date, timezone: string): string {
 }
 
 function atLocalTime(dayUtc: Date, timezone: string, minutesOfDay: number): Date {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(dayUtc);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
-  const y = Number(get('year'));
-  const mo = Number(get('month'));
-  const d = Number(get('day'));
+  // The rrule.js occurrence is anchored at UTC midnight (when DTSTART has
+  // no TZID — as is the case for our "naked" RRULE strings). Use the UTC
+  // calendar day directly; reading the tz-localised day here would shift
+  // back by one for timezones west of UTC (e.g. America/New_York would
+  // render `2026-03-08T00:00:00Z` as `2026-03-07`, producing windows on
+  // the wrong calendar day across DST and any negative-offset tz).
+  const y = dayUtc.getUTCFullYear();
+  const mo = dayUtc.getUTCMonth() + 1;
+  const d = dayUtc.getUTCDate();
   const hh = Math.floor(minutesOfDay / 60);
   const mm = minutesOfDay % 60;
 
@@ -140,7 +152,33 @@ function atLocalTime(dayUtc: Date, timezone: string, minutesOfDay: number): Date
   const targetUtc = Date.UTC(y, mo - 1, d, hh, mm, 0, 0);
   const observedUtc = Date.UTC(oy, omo - 1, od, ohh, omm, 0, 0);
   const offsetMs = targetUtc - observedUtc;
-  return new Date(guess.getTime() + offsetMs);
+  let result = new Date(guess.getTime() + offsetMs);
+
+  // DST-correction pass: if `guess` lands on the opposite side of a DST
+  // transition from the actual target wall-clock, the offset we just
+  // computed is for the wrong regime. Re-format `result` in the target
+  // tz; if its wall-clock matches the target (y/mo/d/hh/mm), we're done.
+  // Otherwise apply a second correction using the result's observed
+  // offset. One iteration is sufficient for all real-world DST jumps
+  // (single 1-hour shift at the boundary).
+  const verifyParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(result);
+  const vget = (t: string) => verifyParts.find((p) => p.type === t)?.value ?? '00';
+  const vy = Number(vget('year'));
+  const vmo = Number(vget('month'));
+  const vd = Number(vget('day'));
+  const vhh = Number(vget('hour')) % 24;
+  const vmm = Number(vget('minute'));
+  if (vy !== y || vmo !== mo || vd !== d || vhh !== hh || vmm !== mm) {
+    const verifiedUtc = Date.UTC(vy, vmo - 1, vd, vhh, vmm, 0, 0);
+    const drift = verifiedUtc - targetUtc;
+    result = new Date(result.getTime() - drift);
+  }
+
+  return result;
 }
 
 /**
