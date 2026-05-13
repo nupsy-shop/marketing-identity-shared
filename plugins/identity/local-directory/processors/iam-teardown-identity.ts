@@ -21,10 +21,9 @@
  *   - Row still `status='failed_delete'`→ run the teardown + DB delete.
  *
  * On success:
- *   1. Re-run the IdP teardown (inline of the parent app's
- *      `lib/identity/teardown.ts` helper; see the entra-disconnect
- *      processor for the established "inline web helpers so the
- *      processor is portable to the worker" pattern).
+ *   1. Re-run the IdP teardown via the consolidated shared helper
+ *      `shared/lib/identity/teardown.ts` (web + worker share the same
+ *      implementation; marketing-identity#1049).
  *   2. Delete the DB row.
  *   3. Emit `identity.teardown.retried` (canonical mapping for the
  *      legacy `IDENTITY_TEARDOWN_RETRIED` constant).
@@ -47,73 +46,14 @@
 
 import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
-import { deleteKeycloakUser, isKeycloakAdminConfigured } from '../../../../lib/keycloakAdmin.js';
+import { isKeycloakAdminConfigured } from '../../../../lib/keycloakAdmin.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
+import { teardownIdpForIdentity } from '../../../../lib/identity/teardown.js';
 
 interface JobResult {
   status: 'completed' | 'skipped';
   jobType: 'iam_teardown_identity';
   reason?: string;
-}
-
-interface TeardownableIdentity {
-  id: string;
-  agency_id: string;
-  keycloak_user_id: string | null;
-  name?: string | null;
-}
-
-/**
- * Inline of the parent app's `teardownIdpForIdentity` helper. Duplicated
- * deliberately — the parent helper imports concrete app singletons
- * (`@/lib/db/prisma`, `@/lib/logger`) that don't exist on the worker.
- * See entra-disconnect for the established duplication pattern; a
- * follow-up issue will consolidate both copies into shared/.
- *
- * Resolves on success (including "nothing to tear down") and throws on
- * failure with a payload-safe message.
- */
-async function teardownIdpForIdentity(identity: TeardownableIdentity): Promise<void> {
-  const { prisma, logger } = getRuntime();
-
-  if (!identity.keycloak_user_id) {
-    logger.debug('iam_teardown_identity: no keycloak_user_id — skipping IdP teardown', {
-      identityId: identity.id,
-    });
-    return;
-  }
-
-  // Realm comes from agency_settings (one row per agency). Tenant-scoped
-  // by the WHERE clause. If the agency has no realm, there is nothing
-  // upstream to tear down.
-  const settings = await prisma.agency_settings.findFirst({
-    where: { agency_id: identity.agency_id },
-    select: { keycloak_realm: true },
-  });
-  const realm = settings?.keycloak_realm;
-  if (!realm) {
-    logger.debug('iam_teardown_identity: agency has no keycloak_realm — skipping IdP teardown', {
-      identityId: identity.id,
-      agencyId: identity.agency_id,
-    });
-    return;
-  }
-
-  try {
-    await deleteKeycloakUser(realm, identity.keycloak_user_id);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    // Idempotency: 404 means the upstream user is already gone — treat
-    // as success; the DB delete proceeds normally.
-    if (/\b404\b/.test(message) || /not\s*found/i.test(message)) {
-      logger.warn('iam_teardown_identity: keycloak user already gone — treating as success', {
-        identityId: identity.id,
-        keycloakUserId: identity.keycloak_user_id,
-      });
-      return;
-    }
-    throw new Error(`Keycloak user delete failed: ${message}`);
-  }
 }
 
 export default async function iamTeardownIdentity(job: Bull.Job): Promise<JobResult> {
@@ -178,11 +118,14 @@ export default async function iamTeardownIdentity(job: Bull.Job): Promise<JobRes
       jobId, tenantId, identityId,
     });
   } else {
-    await teardownIdpForIdentity({
-      id: identity.id,
-      agency_id: identity.agency_id,
-      keycloak_user_id: identity.keycloak_user_id,
-    });
+    await teardownIdpForIdentity(
+      {
+        id: identity.id,
+        agency_id: identity.agency_id,
+        keycloak_user_id: identity.keycloak_user_id,
+      },
+      { prisma, logger },
+    );
   }
 
   // Success — remove the row. Agency-scoped via deleteMany+where.
