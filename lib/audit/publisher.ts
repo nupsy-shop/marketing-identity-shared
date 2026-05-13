@@ -311,6 +311,7 @@ function mapLegacyEventType(legacyEvent: string): string {
     'IDENTITY_UPDATED': 'identity.updated',
     'IDENTITY_DELETED': 'identity.deleted',
     'IDENTITY_TOGGLED': 'identity.toggled',
+    'IDENTITY_DEACTIVATED': 'identity.deactivated',
     'IDENTITY_SOURCE_DELETED': 'identity.source.deleted',
     'IDENTITY_PROVISIONED': 'identity.dedicated.provisioned',
     'PAM_SESSION_START': 'pam.session.checkout',
