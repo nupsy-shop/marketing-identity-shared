@@ -9,7 +9,21 @@
  *   KEYCLOAK_ADMIN_BASE_URL        — e.g. https://pam.accesshive.io
  *   KEYCLOAK_ADMIN_CLIENT_ID       — e.g. marketing-identity-admin
  *   KEYCLOAK_ADMIN_CLIENT_SECRET   — client secret for the admin service account
+ *
+ * Provider-response override bridge (issue #1072):
+ *   Every public function takes an optional trailing `agencyId?: string`.
+ *   When set AND the host registered `resolveProviderOverride` on the
+ *   shared runtime AND a matching `provider_response_overrides` row exists
+ *   for that agency (test tenants only, gated by `agencies.is_test_tenant`
+ *   in the host-side resolver), `adminFetch` short-circuits the real HTTP
+ *   call with the forced status/body. Callers that omit `agencyId` keep
+ *   the previous behaviour exactly. The hook is fail-closed: any error
+ *   while consulting the runtime resolver falls through to the real fetch.
+ *   `globalAdminFetch` does NOT participate — cross-realm admin ops have
+ *   no agency context.
  */
+
+import { getRuntime } from './runtime.js';
 
 export interface KeycloakUser {
   id: string;
@@ -91,12 +105,62 @@ async function getAdminToken(): Promise<string> {
 // ─── Admin API fetch helpers ───────────────────────────────────────────────
 
 /**
+ * Build a synthetic Response matching what `fetch` would return, from a
+ * provider-override row. The body is JSON-stringified when present so
+ * downstream callers' `res.json()` / `res.text()` continue to work.
+ * Returns an empty body for `null`/`undefined` to match Keycloak's habit
+ * of returning empty 204s on PUT/DELETE.
+ */
+function buildOverrideResponse(override: { status: number; body: unknown }): Response {
+  const hasBody = override.body !== null && override.body !== undefined;
+  const bodyText = hasBody
+    ? (typeof override.body === 'string' ? override.body : JSON.stringify(override.body))
+    : null;
+  return new Response(bodyText, {
+    status: override.status,
+    headers: hasBody ? { 'Content-Type': 'application/json' } : undefined,
+  });
+}
+
+/**
+ * Consult the host-registered provider-response override resolver. Returns
+ * a synthetic Response when an override matches; null otherwise. Fail-
+ * closed: any error (uninitialized runtime, resolver throws, etc.) returns
+ * null so the caller proceeds to the real fetch.
+ */
+async function maybeOverrideResponse(url: string, agencyId: string | undefined): Promise<Response | null> {
+  if (!agencyId) return null;
+  try {
+    const runtime = getRuntime();
+    const resolver = runtime.resolveProviderOverride;
+    if (!resolver) return null;
+    const ov = await resolver(agencyId, 'keycloak', url);
+    if (!ov) return null;
+    if (ov.delayMs && ov.delayMs > 0) {
+      await new Promise((r) => setTimeout(r, ov.delayMs));
+    }
+    return buildOverrideResponse(ov);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch from the Keycloak Admin REST API scoped to a specific realm.
  * Path is relative to /admin/realms/{realm}, e.g. '/clients', '/users'.
+ *
+ * @param agencyId Optional. When provided AND the host registered a
+ *   `resolveProviderOverride` hook on the shared runtime AND a matching
+ *   override row exists for the agency, this call short-circuits the real
+ *   HTTP request with the forced status/body (test-tenant gating lives in
+ *   the host resolver). Omit to preserve pre-#1072 behaviour exactly.
  */
-export async function adminFetch(realm: string, path: string, options?: RequestInit): Promise<Response> {
-  const token = await getAdminToken();
+export async function adminFetch(realm: string, path: string, options?: RequestInit, agencyId?: string): Promise<Response> {
   const url = `${baseUrl()}/admin/realms/${realm}${path}`;
+  const overrideRes = await maybeOverrideResponse(url, agencyId);
+  if (overrideRes) return overrideRes;
+
+  const token = await getAdminToken();
   return fetch(url, {
     ...options,
     headers: {
@@ -126,15 +190,15 @@ export async function globalAdminFetch(path: string, options?: RequestInit): Pro
 
 // ─── User operations ───────────────────────────────────────────────────────
 
-export async function findKeycloakUserByEmail(realm: string, email: string): Promise<KeycloakUser | null> {
-  const res = await adminFetch(realm, `/users?email=${encodeURIComponent(email)}&exact=true`);
+export async function findKeycloakUserByEmail(realm: string, email: string, agencyId?: string): Promise<KeycloakUser | null> {
+  const res = await adminFetch(realm, `/users?email=${encodeURIComponent(email)}&exact=true`, undefined, agencyId);
   if (!res.ok) return null;
   const users: KeycloakUser[] = await res.json();
   return users.find(u => u.email?.toLowerCase() === email.toLowerCase()) ?? null;
 }
 
-export async function getKeycloakUser(realm: string, userId: string): Promise<KeycloakUser | null> {
-  const res = await adminFetch(realm, `/users/${userId}`);
+export async function getKeycloakUser(realm: string, userId: string, agencyId?: string): Promise<KeycloakUser | null> {
+  const res = await adminFetch(realm, `/users/${userId}`, undefined, agencyId);
   if (!res.ok) return null;
   return res.json();
 }
@@ -144,25 +208,26 @@ export async function getKeycloakUser(realm: string, userId: string): Promise<Ke
  * every user in a single page. Use for drift-detection / full-realm scans.
  * Returns [] on any non-2xx.
  */
-export async function listRealmUsers(realm: string): Promise<KeycloakUser[]> {
-  const res = await adminFetch(realm, '/users?max=-1');
+export async function listRealmUsers(realm: string, agencyId?: string): Promise<KeycloakUser[]> {
+  const res = await adminFetch(realm, '/users?max=-1', undefined, agencyId);
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function createKeycloakUser(
   user: Partial<KeycloakUser> & { realm?: string },
+  agencyId?: string,
 ): Promise<KeycloakUser> {
   const realm = user.realm || 'master';
   const { realm: _r, ...payload } = user;
   const res = await adminFetch(realm, '/users', {
     method: 'POST',
     body: JSON.stringify({ enabled: true, ...payload }),
-  });
+  }, agencyId);
 
   if (res.status === 409 && user.email) {
     // User already exists — find and return existing user (idempotent)
-    const existing = await findKeycloakUserByEmail(realm, user.email);
+    const existing = await findKeycloakUserByEmail(realm, user.email, agencyId);
     if (existing) return existing;
   }
 
@@ -176,7 +241,7 @@ export async function createKeycloakUser(
   const id = location?.split('/').pop();
   if (!id) throw new Error('Keycloak user created but no ID returned');
 
-  const created = await getKeycloakUser(realm, id);
+  const created = await getKeycloakUser(realm, id, agencyId);
   if (!created) throw new Error(`Created user ${id} but could not fetch it`);
   return created;
 }
@@ -185,15 +250,16 @@ export async function mergeUserAttributes(
   userId: string,
   attributes: Record<string, string[]>,
   realm = 'master',
+  agencyId?: string,
 ): Promise<void> {
-  const user = await getKeycloakUser(realm, userId);
+  const user = await getKeycloakUser(realm, userId, agencyId);
   if (!user) throw new Error(`User ${userId} not found`);
 
   const merged = { ...user.attributes, ...attributes };
   const res = await adminFetch(realm, `/users/${userId}`, {
     method: 'PUT',
     body: JSON.stringify({ ...user, attributes: merged }),
-  });
+  }, agencyId);
 
   if (!res.ok) {
     const text = await res.text();
@@ -201,8 +267,8 @@ export async function mergeUserAttributes(
   }
 }
 
-export async function tagSyntheticIdentity(userId: string, tag: string, realm = 'master'): Promise<void> {
-  await mergeUserAttributes(userId, { synthetic_identity_tag: [tag] }, realm);
+export async function tagSyntheticIdentity(userId: string, tag: string, realm = 'master', agencyId?: string): Promise<void> {
+  await mergeUserAttributes(userId, { synthetic_identity_tag: [tag] }, realm, agencyId);
 }
 
 // ─── User enable / disable / delete ───────────────────────────────────────
@@ -211,14 +277,14 @@ export async function tagSyntheticIdentity(userId: string, tag: string, realm = 
  * Disable a Keycloak user (set enabled=false). User remains in the realm
  * but cannot authenticate. Reversible via enableKeycloakUser.
  */
-export async function disableKeycloakUser(realm: string, userId: string): Promise<void> {
-  const user = await getKeycloakUser(realm, userId);
+export async function disableKeycloakUser(realm: string, userId: string, agencyId?: string): Promise<void> {
+  const user = await getKeycloakUser(realm, userId, agencyId);
   if (!user) throw new Error(`Keycloak user ${userId} not found in realm ${realm}`);
 
   const res = await adminFetch(realm, `/users/${userId}`, {
     method: 'PUT',
     body: JSON.stringify({ ...user, enabled: false }),
-  });
+  }, agencyId);
 
   if (!res.ok) {
     const text = await res.text();
@@ -229,14 +295,14 @@ export async function disableKeycloakUser(realm: string, userId: string): Promis
 /**
  * Re-enable a previously disabled Keycloak user.
  */
-export async function enableKeycloakUser(realm: string, userId: string): Promise<void> {
-  const user = await getKeycloakUser(realm, userId);
+export async function enableKeycloakUser(realm: string, userId: string, agencyId?: string): Promise<void> {
+  const user = await getKeycloakUser(realm, userId, agencyId);
   if (!user) throw new Error(`Keycloak user ${userId} not found in realm ${realm}`);
 
   const res = await adminFetch(realm, `/users/${userId}`, {
     method: 'PUT',
     body: JSON.stringify({ ...user, enabled: true }),
-  });
+  }, agencyId);
 
   if (!res.ok) {
     const text = await res.text();
@@ -248,10 +314,10 @@ export async function enableKeycloakUser(realm: string, userId: string): Promise
  * Hard-delete a Keycloak user from the realm. Irreversible.
  * Used when a user is soft-deleted from the application database.
  */
-export async function deleteKeycloakUser(realm: string, userId: string): Promise<void> {
+export async function deleteKeycloakUser(realm: string, userId: string, agencyId?: string): Promise<void> {
   const res = await adminFetch(realm, `/users/${userId}`, {
     method: 'DELETE',
-  });
+  }, agencyId);
 
   // 404 = already deleted, treat as success (idempotent)
   if (res.status === 404) return;
@@ -267,8 +333,9 @@ export async function deleteKeycloakUser(realm: string, userId: string): Promise
 export async function verifySamlClient(
   realm: string,
   config: { spEntityId: string; acsUrl: string },
+  agencyId?: string,
 ): Promise<{ verified: boolean; reason?: string }> {
-  const res = await adminFetch(realm, '/clients?search=true&first=0&max=200');
+  const res = await adminFetch(realm, '/clients?search=true&first=0&max=200', undefined, agencyId);
   if (!res.ok) return { verified: false, reason: `Keycloak API error (${res.status})` };
 
   const clients: Array<Record<string, unknown>> = await res.json();
@@ -298,8 +365,9 @@ export async function verifySamlClient(
 export async function deleteKeycloakSamlClient(
   realm: string,
   spEntityId: string,
+  agencyId?: string,
 ): Promise<{ deleted: boolean }> {
-  const listRes = await adminFetch(realm, '/clients');
+  const listRes = await adminFetch(realm, '/clients', undefined, agencyId);
   if (!listRes.ok) {
     throw new Error(`listClients failed: HTTP ${listRes.status}`);
   }
@@ -315,7 +383,7 @@ export async function deleteKeycloakSamlClient(
 
   const delRes = await adminFetch(realm, `/clients/${samlClient.id}`, {
     method: 'DELETE',
-  });
+  }, agencyId);
   if (delRes.status === 404) return { deleted: false };
   if (!delRes.ok) {
     throw new Error(`deleteClient failed: HTTP ${delRes.status}`);
@@ -329,11 +397,12 @@ export async function sendKeycloakActionsEmail(
   realm: string,
   userId: string,
   actions: string[] = ['UPDATE_PASSWORD'],
+  agencyId?: string,
 ): Promise<void> {
   const res = await adminFetch(realm, `/users/${userId}/execute-actions-email`, {
     method: 'PUT',
     body: JSON.stringify(actions),
-  });
+  }, agencyId);
 
   if (!res.ok) {
     const text = await res.text();
@@ -357,8 +426,8 @@ export interface RealmIdentityProvider {
   [key: string]: unknown;
 }
 
-export async function listRealmIdentityProviders(realm: string): Promise<RealmIdentityProvider[]> {
-  const res = await adminFetch(realm, '/identity-provider/instances');
+export async function listRealmIdentityProviders(realm: string, agencyId?: string): Promise<RealmIdentityProvider[]> {
+  const res = await adminFetch(realm, '/identity-provider/instances', undefined, agencyId);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Failed to list identity providers (${res.status}): ${text}`);
@@ -366,8 +435,8 @@ export async function listRealmIdentityProviders(realm: string): Promise<RealmId
   return res.json();
 }
 
-export async function getRealmIdentityProvider(realm: string, alias: string): Promise<RealmIdentityProvider | null> {
-  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`);
+export async function getRealmIdentityProvider(realm: string, alias: string, agencyId?: string): Promise<RealmIdentityProvider | null> {
+  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`, undefined, agencyId);
   if (res.status === 404) return null;
   if (!res.ok) {
     const text = await res.text();
@@ -376,32 +445,32 @@ export async function getRealmIdentityProvider(realm: string, alias: string): Pr
   return res.json();
 }
 
-export async function createRealmIdentityProvider(realm: string, idp: RealmIdentityProvider): Promise<void> {
+export async function createRealmIdentityProvider(realm: string, idp: RealmIdentityProvider, agencyId?: string): Promise<void> {
   const res = await adminFetch(realm, '/identity-provider/instances', {
     method: 'POST',
     body: JSON.stringify(idp),
-  });
+  }, agencyId);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Failed to create identity provider (${res.status}): ${text}`);
   }
 }
 
-export async function updateRealmIdentityProvider(realm: string, alias: string, idp: RealmIdentityProvider): Promise<void> {
+export async function updateRealmIdentityProvider(realm: string, alias: string, idp: RealmIdentityProvider, agencyId?: string): Promise<void> {
   const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`, {
     method: 'PUT',
     body: JSON.stringify(idp),
-  });
+  }, agencyId);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Failed to update identity provider ${alias} (${res.status}): ${text}`);
   }
 }
 
-export async function deleteRealmIdentityProvider(realm: string, alias: string): Promise<void> {
+export async function deleteRealmIdentityProvider(realm: string, alias: string, agencyId?: string): Promise<void> {
   const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`, {
     method: 'DELETE',
-  });
+  }, agencyId);
   // 404 — already gone, treat as success (idempotent)
   if (res.status === 404) return;
   if (!res.ok) {
@@ -417,8 +486,8 @@ export interface IdentityProviderMapper {
   config: Record<string, string>;
 }
 
-export async function listIdentityProviderMappers(realm: string, alias: string): Promise<IdentityProviderMapper[]> {
-  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}/mappers`);
+export async function listIdentityProviderMappers(realm: string, alias: string, agencyId?: string): Promise<IdentityProviderMapper[]> {
+  const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}/mappers`, undefined, agencyId);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Failed to list IdP mappers (${res.status}): ${text}`);
@@ -426,11 +495,11 @@ export async function listIdentityProviderMappers(realm: string, alias: string):
   return res.json();
 }
 
-export async function createIdentityProviderMapper(realm: string, alias: string, mapper: IdentityProviderMapper): Promise<void> {
+export async function createIdentityProviderMapper(realm: string, alias: string, mapper: IdentityProviderMapper, agencyId?: string): Promise<void> {
   const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}/mappers`, {
     method: 'POST',
     body: JSON.stringify(mapper),
-  });
+  }, agencyId);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Failed to create IdP mapper (${res.status}): ${text}`);
@@ -442,18 +511,19 @@ export async function createIdentityProviderMapper(realm: string, alias: string,
 export async function bulkProvisionUsers(
   realm: string,
   users: Array<Partial<KeycloakUser>>,
+  agencyId?: string,
 ): Promise<KeycloakUser[]> {
   const results: KeycloakUser[] = [];
   for (const user of users) {
     // Check if user already exists
     if (user.email) {
-      const existing = await findKeycloakUserByEmail(realm, user.email);
+      const existing = await findKeycloakUserByEmail(realm, user.email, agencyId);
       if (existing) {
         results.push(existing);
         continue;
       }
     }
-    const created = await createKeycloakUser({ ...user, realm });
+    const created = await createKeycloakUser({ ...user, realm }, agencyId);
     results.push(created);
   }
   return results;
