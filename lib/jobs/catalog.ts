@@ -130,6 +130,16 @@ export const JOB_CATALOG = {
   // ─── Provisioning (tenant-scoped user/IdP operations) ───────────────
   iam_provision_identity:    { queue: QUEUE_NAMES.PROVISIONING },
   iam_update_identity:       { queue: QUEUE_NAMES.PROVISIONING },
+  // issue #1044 — retry of the IdP teardown (Keycloak user delete +
+  // per-plugin disconnect hooks) for a row currently in
+  // `status='failed_delete'`. Enqueued by the DELETE route on teardown
+  // error and by `POST /api/integration-identities/[id]/retry-delete`
+  // when an operator clicks "Retry delete". On success the handler
+  // deletes the DB row and emits `IDENTITY_DELETED`; on repeated
+  // failure the row stays `failed_delete` and Bull's normal
+  // retry/backoff/DLQ applies. Worker handler is idempotent — a NoOp
+  // if the row is gone or already back to `status='active'`.
+  iam_teardown_identity:     { queue: QUEUE_NAMES.PROVISIONING },
   iam_provision_app_user:    { queue: QUEUE_NAMES.PROVISIONING },
   iam_disable_app_user:      { queue: QUEUE_NAMES.PROVISIONING },
   iam_enable_app_user:       { queue: QUEUE_NAMES.PROVISIONING },

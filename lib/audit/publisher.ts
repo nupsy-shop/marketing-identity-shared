@@ -312,6 +312,8 @@ function mapLegacyEventType(legacyEvent: string): string {
     'IDENTITY_DELETED': 'identity.deleted',
     'IDENTITY_TOGGLED': 'identity.toggled',
     'IDENTITY_DEACTIVATED': 'identity.deactivated',
+    'IDENTITY_DELETE_FAILED': 'identity.delete_failed',
+    'IDENTITY_TEARDOWN_RETRIED': 'identity.teardown.retried',
     'IDENTITY_SOURCE_DELETED': 'identity.source.deleted',
     'IDENTITY_PROVISIONED': 'identity.dedicated.provisioned',
     'PAM_SESSION_START': 'pam.session.checkout',
