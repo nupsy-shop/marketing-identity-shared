@@ -44,10 +44,23 @@ interface IdentityRow {
   isActive: boolean;
 }
 
-async function getIdentityById(identityId: string): Promise<IdentityRow | null> {
+/**
+ * Look up an identity, scoped to the caller's agency.
+ *
+ * The shared runtime exposes the **raw** Prisma client (not the
+ * tenant-middleware-wrapped one), so this helper MUST filter by
+ * `agency_id` explicitly. A `findUnique({ where: { id } })` here would
+ * silently leak cross-agency rows and let a cross-agency rotate spoof
+ * either succeed against the wrong vault or 500 downstream instead of
+ * cleanly returning "not found" (#1164).
+ */
+async function getIdentityById(
+  identityId: string,
+  actorAgencyId: string,
+): Promise<IdentityRow | null> {
   const { prisma } = getRuntime();
-  const row = await prisma.integration_identities.findUnique({
-    where: { id: identityId },
+  const row = await prisma.integration_identities.findFirst({
+    where: { id: identityId, agency_id: actorAgencyId },
   });
   if (!row) return null;
   const metadata = (row.metadata || {}) as Record<string, unknown>;
@@ -183,6 +196,11 @@ async function emitSkipped(params: {
 // ─── Auto-Rotate on Check-in ────────────────────────────────────────────────
 
 export interface AutoRotateContext {
+  /**
+   * Agency id of the caller. REQUIRED — used to scope the identity
+   * lookup so a cross-agency identityId can't be probed. See #1164.
+   */
+  actorAgencyId: string;
   grantId?: string;
   actorEmail?: string;
 }
@@ -199,9 +217,9 @@ export interface AutoRotateResult {
  */
 export async function autoRotateOnCheckin(
   identityId: string,
-  context: AutoRotateContext = {},
+  context: AutoRotateContext,
 ): Promise<AutoRotateResult> {
-  const identity = await getIdentityById(identityId);
+  const identity = await getIdentityById(identityId, context.actorAgencyId);
   if (!identity) return { rotated: false, reason: ROTATION_SKIP_REASONS.IDENTITY_NOT_FOUND };
 
   // Service Account: never auto-rotate.
@@ -246,6 +264,12 @@ export async function autoRotateOnCheckin(
 // ─── Manual Rotation ────────────────────────────────────────────────────────
 
 export interface ManualRotateOptions {
+  /**
+   * Agency id of the operator triggering the rotation. REQUIRED — used
+   * to scope the identity lookup so a cross-agency identityId returns
+   * `Identity not found` (404) instead of leaking / 500ing. See #1164.
+   */
+  actorAgencyId: string;
   actorEmail?: string;
   confirmed?: boolean;
 }
@@ -264,9 +288,9 @@ export interface ManualRotateResult {
  */
 export async function manualRotate(
   identityId: string,
-  { actorEmail, confirmed = false }: ManualRotateOptions = {},
+  { actorAgencyId, actorEmail, confirmed = false }: ManualRotateOptions,
 ): Promise<ManualRotateResult> {
-  const identity = await getIdentityById(identityId);
+  const identity = await getIdentityById(identityId, actorAgencyId);
   if (!identity) return { success: false, error: 'Identity not found' };
 
   if (identity.identityType === IdentityType.HUMAN_INTERACTIVE) {
@@ -333,7 +357,11 @@ export async function rotateIdentityCredentialShared(
 ): Promise<RotateIdentityCredentialResult> {
   const { agencyId, identityId, triggeredBy = 'scheduled' } = input;
 
-  const identity = await getIdentityById(identityId);
+  // Identity lookup is scoped to `agencyId` (#1164). The defence-in-
+  // depth `identity.agencyId !== agencyId` check below is now dead in
+  // the happy path but kept as a belt-and-braces guard against future
+  // refactors of getIdentityById.
+  const identity = await getIdentityById(identityId, agencyId);
   if (!identity) {
     await emitSkipped({
       agencyId,
