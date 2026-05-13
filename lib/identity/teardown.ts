@@ -17,7 +17,12 @@
  *   1. If `keycloak_user_id` is null → NoOp success (nothing upstream).
  *   2. If the agency has no `agency_settings.keycloak_realm` →
  *      NoOp success (no realm to address the user in).
- *   3. Otherwise call `deleteKeycloakUser(realm, keycloak_user_id)`.
+ *   3. Otherwise call `deleteKeycloakUser(realm, keycloak_user_id,
+ *      agency_id)`. The trailing `agency_id` is what lets the
+ *      provider-override hook in `keycloakAdmin.adminFetch` short-circuit
+ *      the real HTTP for test tenants (issue #1072). Without it, the
+ *      hook can never fire on the teardown code path — see #1071 for the
+ *      failed-delete BDD scenario that depends on this.
  *      A 404 (defensive — the shared admin client already absorbs it
  *      internally) is treated as success; anything else re-throws with
  *      a payload-safe message for inclusion in an audit event.
@@ -102,7 +107,7 @@ export async function teardownIdpForIdentity(
   }
 
   try {
-    await deleteKeycloakUser(realm, identity.keycloak_user_id);
+    await deleteKeycloakUser(realm, identity.keycloak_user_id, identity.agency_id);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     // Idempotency: a 404 means the upstream user is already gone — treat
