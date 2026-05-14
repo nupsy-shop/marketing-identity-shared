@@ -197,6 +197,7 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
   // ── Render stage ──────────────────────────────────────────────────────
   let reportBytes: Uint8Array;
   try {
+    maybeInjectFault('render', client.id);
     const payload = await assembleTrustReport({
       agencyId,
       clientId: client.id,
@@ -216,7 +217,7 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
         updated_at: new Date(),
       },
     });
-    await safeDispatch(agencyId, 'client.trust_report.failed', {
+    await safeDispatch(agencyId, 'client.trust_report.failed', withRunId({
       client: client.name,
       clientId: client.id,
       agencyId,
@@ -224,7 +225,7 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
       quarterEnd: quarter.endDate,
       stage: 'render',
       reason,
-    }, dryRun);
+    }), dryRun);
     return;
   }
 
@@ -242,14 +243,14 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
     data: { status: 'generated', report_url: reportUrl, updated_at: new Date() },
   });
 
-  await safeDispatch(agencyId, 'client.trust_report.generated', {
+  await safeDispatch(agencyId, 'client.trust_report.generated', withRunId({
     client: client.name,
     clientId: client.id,
     agencyId,
     quarterStart: quarter.startDate,
     quarterEnd: quarter.endDate,
     reportUrl,
-  }, dryRun);
+  }), dryRun);
 
   // ── Resolve contacts (client-scoped) ──────────────────────────────────
   const contacts = await prisma.client_contacts.findMany({
@@ -271,7 +272,8 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
         contacts: contacts.length,
       });
     } else {
-      await dispatchNotification(agencyId, 'client.trust_report.delivered', {
+      maybeInjectFault('dispatch', client.id);
+      await dispatchNotification(agencyId, 'client.trust_report.delivered', withRunId({
         client: client.name,
         clientId: client.id,
         agencyId,
@@ -279,7 +281,7 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
         quarterEnd: quarter.endDate,
         reportUrl,
         contactIds,
-      });
+      }));
     }
     result.reportsDelivered++;
     await prisma.trust_report_delivery_log.update({
@@ -304,7 +306,7 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
         updated_at: new Date(),
       },
     });
-    await safeDispatch(agencyId, 'client.trust_report.failed', {
+    await safeDispatch(agencyId, 'client.trust_report.failed', withRunId({
       client: client.name,
       clientId: client.id,
       agencyId,
@@ -312,7 +314,7 @@ async function processClient(args: ProcessClientArgs): Promise<void> {
       quarterEnd: quarter.endDate,
       stage: 'dispatch',
       reason,
-    }, dryRun);
+    }), dryRun);
   }
 }
 
@@ -345,7 +347,7 @@ async function retryDispatch(args: RetryDispatchArgs): Promise<void> {
 
   try {
     if (!dryRun) {
-      await dispatchNotification(agencyId, 'client.trust_report.delivered', {
+      await dispatchNotification(agencyId, 'client.trust_report.delivered', withRunId({
         client: client.name,
         clientId: client.id,
         agencyId,
@@ -353,7 +355,7 @@ async function retryDispatch(args: RetryDispatchArgs): Promise<void> {
         quarterEnd: quarter.endDate,
         reportUrl,
         contactIds,
-      });
+      }));
     }
     result.reportsDelivered++;
     await prisma.trust_report_delivery_log.update({
@@ -397,4 +399,25 @@ async function safeDispatch(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+// ── E2E test hooks ────────────────────────────────────────────────────
+// Fail-closed in production: both helpers below short-circuit when
+// `NODE_ENV === 'production'`. They are only active under E2E runs that
+// explicitly set the corresponding env vars in
+// `tests/support/scripts/run-trust-report-scheduler.ts`.
+
+function withRunId(context: Record<string, unknown>): Record<string, unknown> {
+  if (process.env.NODE_ENV === 'production') return context;
+  const runId = process.env.E2E_TRUST_REPORTS_RUN_ID;
+  if (!runId) return context;
+  return { ...context, run_id: runId };
+}
+
+function maybeInjectFault(stage: 'render' | 'dispatch', clientId: string): void {
+  if (process.env.NODE_ENV === 'production') return;
+  const target = process.env.E2E_TRUST_REPORTS_FAULT_INJECT;
+  if (target !== stage) return;
+  if (process.env.E2E_TRUST_REPORTS_FAULT_TARGET_CLIENT !== clientId) return;
+  throw new Error(stage === 'render' ? 'render_error' : 'dispatch_error');
 }
