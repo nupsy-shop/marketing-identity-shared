@@ -321,9 +321,17 @@ function mapLegacyEventType(legacyEvent: string): string {
     'PAM_SESSION_EXPIRED': 'pam.session.expired',
     'PAM_SESSION_EXTENDED': 'pam.session.extended',
     'PAM_SESSION_TERMINATED': 'pam.session.force_terminated',
+    // The PAM route handlers emit these legacy names directly (not the
+    // PAM_SESSION_* aliases above, which no route emits). Without these
+    // entries the events fell through to `legacy.pam.*` keys that no
+    // downstream reader (session-recording, siem, gdpr) queries.
+    'PAM_CHECKOUT': 'pam.session.checkout',
+    'PAM_CHECKIN': 'pam.session.checkin',
+    'PAM_FORCE_TERMINATE': 'pam.session.force_terminated',
     'PAM_APPROVAL_REQUESTED': 'pam.approval.requested',
     'PAM_APPROVAL_APPROVED': 'pam.approval.approved',
     'PAM_APPROVAL_DENIED': 'pam.approval.denied',
+    'ACCESS_APPROVED': 'access.approved',
     'CLIENT_CREATED': 'admin.client.created',
     'CLIENT_UPDATED': 'admin.client.updated',
     'CLIENT_DELETED': 'admin.client.deleted',
@@ -380,6 +388,10 @@ function mapLegacyEventType(legacyEvent: string): string {
     'DEDICATED_IDENTITY_UPDATED': 'identity.dedicated.updated',
     'CLIENT_CREDENTIAL_CREATED': 'credential.client.created',
     'CLIENT_CREDENTIAL_UPDATED': 'credential.client.updated',
+    // Emitted by app/api/client-credentials/[id]/{save,rotate}; previously
+    // fell through to `legacy.client.credential.*`.
+    'CLIENT_CREDENTIAL_SAVED': 'credential.client.saved',
+    'CLIENT_CREDENTIAL_ROTATED': 'credential.client.rotated',
     'PLATFORM_CREDENTIALS_SAVED': 'admin.platform.credentials_saved',
     'OAUTH_TOKEN_STORED': 'oauth.token.stored',
     'OAUTH_TARGET_SELECTED': 'oauth.target.selected',
@@ -397,6 +409,7 @@ function mapLegacyEventType(legacyEvent: string): string {
     'PAM_CHECKOUT_INITIATED': 'pam.checkout.initiated',
     'PAM_CHECKOUT_COMPLETED': 'pam.checkout.completed',
     'PAM_CHECKOUT_CONFIRMED': 'pam.checkout.confirmed',
+    'PAM_CHECKOUT_BLOCKED_IP': 'pam.checkout.blocked_ip',
     'PAM_APPROVAL_RESOLVED': 'pam.approval.resolved',
     'PAM_SESSION_REVOKED': 'pam.session.revoked',
     'USER_LOGIN': 'auth.login.success',
