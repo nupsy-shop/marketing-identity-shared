@@ -350,36 +350,45 @@ async function executeStep(
     return;
   }
 
-  // Create step execution record
-  const stepExec = await prisma.workflow_step_executions.create({
-    data: {
-      instance_id: instance.id,
-      step_id: stepDef.id,
-      step_type: stepDef.type,
-      status: 'running',
-      input: (instance.context || {}) as Prisma.InputJsonValue,
-      started_at: new Date(),
-      agency_id: instance.agency_id,
-    },
-  });
-
-  publishAuditEvent({
-    eventType: 'workflow.step.started',
-    source: 'accesshive',
-    actor: { id: 'system', type: 'system' },
-    agency: { id: instance.agency_id },
-    resource: { type: 'workflow-step', id: stepExec.id },
-    context: { instanceId: instance.id, stepId: stepDef.id, stepType: stepDef.type },
-  }).catch(() => {});
+  // stepExec is declared here so the catch block can reference it even if the
+  // create call itself throws (in which case stepExec remains undefined and the
+  // catch skips the status-update, going straight to failInstance).
+  let stepExec: { id: string } | undefined;
 
   try {
+    // Create step execution record inside try so a DB write failure is handled
+    // gracefully rather than propagating as an unhandled exception to the caller.
+    const created = await prisma.workflow_step_executions.create({
+      data: {
+        instance_id: instance.id,
+        step_id: stepDef.id,
+        step_type: stepDef.type,
+        status: 'running',
+        input: (instance.context || {}) as Prisma.InputJsonValue,
+        started_at: new Date(),
+        agency_id: instance.agency_id,
+      },
+    });
+    // Publish to the outer binding so the catch block can tell whether the row
+    // exists; `created` stays the definitely-defined local for the rest of the try.
+    stepExec = created;
+
+    publishAuditEvent({
+      eventType: 'workflow.step.started',
+      source: 'accesshive',
+      actor: { id: 'system', type: 'system' },
+      agency: { id: instance.agency_id },
+      resource: { type: 'workflow-step', id: created.id },
+      context: { instanceId: instance.id, stepId: stepDef.id, stepType: stepDef.type },
+    }).catch(() => {});
+
     const context: WorkflowContext = (instance.context || {}) as WorkflowContext;
     const result: StepExecutionResult = await executor.execute(stepDef, context, instance);
 
     if (result.status === 'completed') {
       // Mark step completed
       await prisma.workflow_step_executions.update({
-        where: { id: stepExec.id },
+        where: { id: created.id },
         data: {
           status: 'completed',
           output: (result.result || {}) as Prisma.InputJsonValue,
@@ -399,7 +408,7 @@ async function executeStep(
         source: 'accesshive',
         actor: { id: 'system', type: 'system' },
         agency: { id: instance.agency_id },
-        resource: { type: 'workflow-step', id: stepExec.id },
+        resource: { type: 'workflow-step', id: created.id },
         context: { instanceId: instance.id, stepId: stepDef.id, result: result.result },
       }).catch(() => {});
 
@@ -429,7 +438,7 @@ async function executeStep(
         : null;
 
       await prisma.workflow_step_executions.update({
-        where: { id: stepExec.id },
+        where: { id: created.id },
         data: {
           status: 'waiting',
           timeout_at: timeoutAt,
@@ -446,7 +455,7 @@ async function executeStep(
 
     } else if (result.status === 'failed') {
       await prisma.workflow_step_executions.update({
-        where: { id: stepExec.id },
+        where: { id: created.id },
         data: {
           status: 'failed',
           output: (result.result || {}) as Prisma.InputJsonValue,
@@ -459,7 +468,7 @@ async function executeStep(
         source: 'accesshive',
         actor: { id: 'system', type: 'system' },
         agency: { id: instance.agency_id },
-        resource: { type: 'workflow-step', id: stepExec.id },
+        resource: { type: 'workflow-step', id: created.id },
         context: { instanceId: instance.id, stepId: stepDef.id, error: result.result?.error },
       }).catch(() => {});
 
@@ -467,14 +476,19 @@ async function executeStep(
     }
   } catch (err) {
     logger.error(`[Workflow Engine] Step execution error`, { message: err instanceof Error ? err.message : String(err) });
-    await prisma.workflow_step_executions.update({
-      where: { id: stepExec.id },
-      data: {
-        status: 'failed',
-        output: { error: (err as Error).message },
-        completed_at: new Date(),
-      },
-    });
+    // Only update the step execution record if the create succeeded; if stepExec
+    // is undefined the create itself threw (e.g. constraint violation) and there
+    // is no row to update.
+    if (stepExec) {
+      await prisma.workflow_step_executions.update({
+        where: { id: stepExec.id },
+        data: {
+          status: 'failed',
+          output: { error: (err as Error).message },
+          completed_at: new Date(),
+        },
+      });
+    }
     await failInstance(instance.id, stepDef.id, (err as Error).message, instance.agency_id);
   }
 }
