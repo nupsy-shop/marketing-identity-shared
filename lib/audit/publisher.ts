@@ -295,7 +295,7 @@ export async function publishLegacyEvent(
   });
 }
 
-function mapLegacyEventType(legacyEvent: string): string {
+export function mapLegacyEventType(legacyEvent: string): string {
   // Verbatim copy of the MAP from the prior publisher.ts (lines 534–747).
   const MAP: Record<string, string> = {
     'ACCESS_REQUEST_CREATED': 'access.request.created',
@@ -324,6 +324,12 @@ function mapLegacyEventType(legacyEvent: string): string {
     'PAM_APPROVAL_REQUESTED': 'pam.approval.requested',
     'PAM_APPROVAL_APPROVED': 'pam.approval.approved',
     'PAM_APPROVAL_DENIED': 'pam.approval.denied',
+    // Route handlers under app/api/pam emit these names (not the PAM_SESSION_*
+    // names above) — alias them to the same canonical eventTypes the GDPR
+    // report, session-recording UI, and SIEM CEF mapper read.
+    'PAM_CHECKOUT': 'pam.session.checkout',
+    'PAM_CHECKIN': 'pam.session.checkin',
+    'PAM_FORCE_TERMINATE': 'pam.session.force_terminated',
     'CLIENT_CREATED': 'admin.client.created',
     'CLIENT_UPDATED': 'admin.client.updated',
     'CLIENT_DELETED': 'admin.client.deleted',
@@ -386,6 +392,7 @@ function mapLegacyEventType(legacyEvent: string): string {
     'OAUTH_TOKEN_UPDATED': 'oauth.token.updated',
     'ACCESS_GRANTED': 'access.granted',
     'ACCESS_REVOKED': 'access.revoked',
+    'ACCESS_APPROVED': 'access.approved',
     'IDENTITY_SOURCE_CREATED': 'identity.source.created',
     'IDENTITY_SOURCE_SYNCED': 'identity.source.synced',
     'IDENTITY_SOURCE_UPDATED': 'identity.source.updated',
