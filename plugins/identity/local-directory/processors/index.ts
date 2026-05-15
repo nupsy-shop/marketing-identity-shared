@@ -7,7 +7,7 @@ export default {
   iam_enable_app_user: () => import('./iam-enable-app-user.js'),
   iam_deprovision_app_user: () => import('./iam-deprovision-app-user.js'),
   local_group_writeback_dispatch: () => import('./local-group-writeback-dispatch.js'),
-  local_directory_check_health: () => import('./local-directory-check-health.js'),
+  iam_check_health: () => import('./iam-check-health.js'),
 };
 
 export const concurrency = {
@@ -19,5 +19,5 @@ export const concurrency = {
   // Single bounded HTTP probe against Keycloak admin — concurrency 1
   // matches gws_check_health / entra_check_health and keeps simultaneous
   // probes for the same tenant from racing the admin token refresh.
-  local_directory_check_health: 1,
+  iam_check_health: 1,
 };

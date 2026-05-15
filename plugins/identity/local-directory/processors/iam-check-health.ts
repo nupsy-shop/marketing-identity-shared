@@ -2,7 +2,7 @@
  * Local Directory Connection Health Check — Plugin Processor
  *
  * Mirror of `gws-check-health.ts` / `entra-check-health.ts`. Processes
- * `local_directory_check_health` Bull jobs: for the agency in the job
+ * `iam_check_health` Bull jobs: for the agency in the job
  * payload, runs the Local Directory liveness probe (Keycloak admin
  * reachability + per-agency realm existence) against every
  * `identity_sources` row with `plugin_key = 'local-directory'`,
@@ -41,14 +41,14 @@ import { checkLocalDirectory } from '../liveness.js';
 
 interface JobResult {
   status: 'completed';
-  jobType: 'local_directory_check_health';
+  jobType: 'iam_check_health';
   agencyId: string;
   checked: number;
   transitioned: number;
   notified: number;
 }
 
-export default async function localDirectoryCheckHealth(
+export default async function iamCheckHealth(
   job: Bull.Job,
 ): Promise<JobResult> {
   const { tenantId, dryRun } = job.data as { tenantId: string; dryRun?: boolean };
@@ -89,7 +89,7 @@ export default async function localDirectoryCheckHealth(
           },
         });
       } catch (err: unknown) {
-        logger.warn('local_directory_check_health: failed to stamp last_sync_at', {
+        logger.warn('iam_check_health: failed to stamp last_sync_at', {
           sourceId: r.sourceId,
           err: err instanceof Error ? err.message : String(err),
         });
@@ -99,7 +99,7 @@ export default async function localDirectoryCheckHealth(
 
   const transitioned = results.filter((r) => r.transitioned);
   if (transitioned.length > 0) {
-    logger.info('local_directory_check_health: transitions', {
+    logger.info('iam_check_health: transitions', {
       jobId: String(job.id),
       tenantId,
       transitions: transitioned.map(
@@ -110,7 +110,7 @@ export default async function localDirectoryCheckHealth(
 
   return {
     status: 'completed',
-    jobType: 'local_directory_check_health',
+    jobType: 'iam_check_health',
     agencyId: tenantId,
     checked: results.length,
     transitioned: transitioned.length,
