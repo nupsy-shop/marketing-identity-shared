@@ -18,6 +18,15 @@
  *   'success'`, treating the health probe itself as the canonical
  *   liveness pulse.
  *
+ *   We gate the stamp on the orchestrator's `reason` field starting
+ *   with "Liveness OK" rather than `newState === 'connected'`. The
+ *   `connected` state is unreachable on the very first probe because
+ *   evaluateHealth treats `last_sync_at = NULL` as Infinity-stale and
+ *   returns `degraded` (chicken-and-egg). Gating on the liveness
+ *   outcome instead lets the first successful probe seed the
+ *   freshness; the next probe then sees a fresh stamp and lands in
+ *   `connected`.
+ *
  *   Failed checks deliberately do NOT touch `last_sync_*`; the
  *   orchestrator already moved the row into `error` / `needs_reauth`
  *   based on the liveness outcome, and we want the staleness clock to
@@ -54,8 +63,22 @@ export default async function localDirectoryCheckHealth(
 
   if (!dryRun) {
     const now = new Date();
-    const healthy = results.filter((r) => r.newState === 'connected');
-    for (const r of healthy) {
+    // Stamp on liveness success, NOT on newState === 'connected'.
+    //
+    // Why: evaluateHealth treats `last_sync_at = NULL` as Infinity-stale and
+    // returns `degraded` even when the liveness probe just succeeded. If we
+    // gated the stamp on `connected`, the first-ever probe could never reach
+    // `connected` (because last_sync_at is NULL), so we'd never stamp, and
+    // the row would be stuck in `degraded` forever — exactly the loop we
+    // saw in production for agency-trevox's local-directory row.
+    //
+    // The orchestrator's `reason` string starts with "Liveness OK" iff the
+    // probe was ok (see shared/lib/platform-health/checker.ts), which is the
+    // signal we actually care about for the sync-signal stamp on this
+    // write-managed source. After the stamp lands, the NEXT probe's
+    // evaluateHealth sees a fresh last_sync_at and returns `connected`.
+    const livenessOk = results.filter((r) => r.reason?.startsWith('Liveness OK'));
+    for (const r of livenessOk) {
       try {
         await prisma.identity_sources.update({
           where: { id: r.sourceId },
