@@ -165,6 +165,11 @@ function isPrimaryKeyConflict(err: unknown): boolean {
   return (err as { code?: string })?.code === 'P2002';
 }
 
+function isSerializationFailure(err: unknown): boolean {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) return err.code === 'P2034';
+  return (err as { code?: string })?.code === 'P2034';
+}
+
 function jitterBackoff(attempt: number): Promise<void> {
   const base = 25 * Math.pow(2, attempt);   // 25, 50, 100, 200, 400 ms
   const ms = base + Math.floor(Math.random() * base);
@@ -209,7 +214,7 @@ async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Prom
       }, { isolationLevel: 'Serializable' });
       return; // success
     } catch (err) {
-      if (isPrimaryKeyConflict(err) && attempt < MAX_PK_RETRIES - 1) {
+      if ((isPrimaryKeyConflict(err) || isSerializationFailure(err)) && attempt < MAX_PK_RETRIES - 1) {
         await jitterBackoff(attempt);
         continue;
       }
