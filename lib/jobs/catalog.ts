@@ -163,6 +163,11 @@ export const JOB_CATALOG = {
   entra_suspend_user:        { queue: QUEUE_NAMES.PROVISIONING },
   // issue #988 — Entra mirror of gws_check_health. See note above.
   entra_check_health:        { queue: QUEUE_NAMES.AUTOMATION },
+  // Local Directory mirror — Keycloak admin reachability + per-agency
+  // realm existence probe. Same cadence (10 min) and queue tier as
+  // the GWS / Entra siblings; on success it also stamps last_sync_at
+  // since Local Directory has no upstream sync to clear staleness.
+  local_directory_check_health: { queue: QUEUE_NAMES.AUTOMATION },
   entra_unsuspend_user:      { queue: QUEUE_NAMES.PROVISIONING },
   entra_add_group_member:    { queue: QUEUE_NAMES.PROVISIONING },
   entra_remove_group_member: { queue: QUEUE_NAMES.PROVISIONING },
