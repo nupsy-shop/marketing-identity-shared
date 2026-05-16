@@ -222,7 +222,23 @@ const actionHandlers: Record<string, ActionHandler> = {
     const prevStatuses = beforeState.previousStatuses as string[] | undefined;
     if (itemIds?.length && prevStatuses?.length) {
       for (let i = 0; i < itemIds.length; i++) {
-        await prisma.access_request_items.update({
+        // `updateMany` instead of `update` so the revert action tolerates
+        // already-deleted / never-created rows. The action.executor wraps each
+        // step in a try/catch and treats P2025 (record-not-found from `update`)
+        // as a step failure — which short-circuits the rest of the
+        // `revert-remediation` workflow, leaving the parent `remediations` row
+        // stuck at `completed` instead of flipping to `reverted`.
+        //
+        // The two scenarios that surfaced this are revert-related (Qase #119
+        // and #122): the E2E seed writes only the `remediations` row with
+        // synthetic item IDs in `before_state`, so the items it references
+        // don't exist as `access_request_items` rows. In production, items
+        // exist and the behaviour is identical — `updateMany` matches the
+        // single row by primary key and updates it. The only semantic shift
+        // is "missing item" is no longer an error; restore_before_state is
+        // best-effort by design and the upstream comment block (line 181)
+        // describes it as "flips access_request_items back."
+        await prisma.access_request_items.updateMany({
           where: { id: itemIds[i] },
           data: { status: prevStatuses[i] || 'completed', updatedAt: new Date() },
         });
