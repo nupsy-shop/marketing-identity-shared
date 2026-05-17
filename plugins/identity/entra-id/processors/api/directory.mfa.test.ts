@@ -164,6 +164,43 @@ describe('fetchUsersWithMfa', () => {
     vi.useRealTimers();
   });
 
+  it('honors retry-after (lowercase) the same as Retry-After (capitalized)', async () => {
+    // HTTP headers are case-insensitive; Graph may return either casing depending
+    // on the proxy in front. This test verifies the case-insensitive getHeader
+    // helper is used so throttle handling does not silently break.
+    vi.useFakeTimers();
+
+    graphClient.fetchUsers.mockResolvedValue([
+      { id: 'u1', userPrincipalName: 'alice@example.com', raw_attributes: {} },
+    ]);
+    graphClient.batch
+      .mockResolvedValueOnce({
+        // Lowercase header — must be treated identically to 'Retry-After'.
+        responses: [{ id: 'u1', status: 429, headers: { 'retry-after': '1' }, body: {} }],
+      })
+      .mockResolvedValueOnce({
+        responses: [
+          {
+            id: 'u1',
+            status: 200,
+            body: { value: [{ '@odata.type': '#microsoft.graph.fido2AuthenticationMethod' }] },
+          },
+        ],
+      });
+
+    const resultPromise = fetchUsersWithMfa(graphClient, { agencyId: 'agency-1', now: Date.now() });
+
+    // Advance 1 s — the Retry-After value — to unblock the retry.
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const result = await resultPromise;
+
+    expect(graphClient.batch).toHaveBeenCalledTimes(2);
+    expect(result.users[0].raw_attributes.mfa?.enrolled).toBe(true);
+
+    vi.useRealTimers();
+  });
+
   it('caps Retry-After wait at 30 s to prevent indefinite hangs', async () => {
     vi.useFakeTimers();
 

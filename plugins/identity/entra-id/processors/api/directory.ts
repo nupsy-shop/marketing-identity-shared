@@ -197,6 +197,20 @@ const ONE_HOUR_MS = 60 * 60 * 1000;
 const BATCH_SIZE = 20;
 const MAX_RETRY_AFTER_MS = 30_000;
 
+/**
+ * Case-insensitive header lookup.
+ * HTTP headers are case-insensitive per RFC 7230; Graph returns "Retry-After"
+ * today but a proxy or future change could alter casing without warning.
+ */
+function getHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
+
 /** Injectable context for testability (agencyId for logging, now for TTL). */
 export interface MfaSyncContext {
   agencyId: string;
@@ -286,8 +300,8 @@ export async function fetchUsersWithMfa(
         // Find the largest Retry-After among throttled inner responses (seconds).
         let retryAfterMs = 0;
         for (const r of resp.responses) {
-          if (r.status === 429 && r.headers?.['Retry-After']) {
-            const seconds = parseInt(r.headers['Retry-After'], 10);
+          if (r.status === 429 && getHeader(r.headers, 'Retry-After')) {
+            const seconds = parseInt(getHeader(r.headers, 'Retry-After')!, 10);
             if (!isNaN(seconds) && seconds > 0) {
               retryAfterMs = Math.max(retryAfterMs, seconds * 1000);
             }

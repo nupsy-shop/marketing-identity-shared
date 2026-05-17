@@ -204,7 +204,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         agency: { id: tenantId },
         resource: { type: 'identity_source', id: sourceId },
         context: { syncRunId, affectedUserCount: affectedCount },
-      }).catch(() => {});
+      }).catch((err) => logger.error({ err, tenantId, sourceId }, 'failed to publish entra.mfa_scope_missing audit event'));
 
       // Flag the source so the UI can show the re-consent banner.
       const currentMeta = (source.metadata ?? {}) as Record<string, unknown>;
@@ -214,7 +214,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
           metadata: { ...currentMeta, entraMfaConsentMissing: true } as never,
           updated_at: new Date(),
         },
-      }).catch(() => {});
+      }).catch((err) => logger.error({ err, sourceId }, 'failed to update identity_sources.metadata.entraMfaConsentMissing'));
 
       logger.warn('entra_sync_directory: UserAuthenticationMethod.Read.All consent missing — MFA data will not be synced', {
         tenantId, sourceId,
