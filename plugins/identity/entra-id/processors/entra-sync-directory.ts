@@ -149,9 +149,12 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     const mfaClient: GraphMfaClient = {
       async fetchUsers() {
         const graphUsers = await fetchUsers(accessToken);
-        // Enrich with current raw_attributes.mfa from DB so TTL check works.
+        // Scope DB read to only the users Graph returned this run.
+        // Previously this was an unfiltered scan of the full tenant table;
+        // for large tenants that was significant wasted I/O on every sync.
+        const graphUserIds = graphUsers.map((u) => u.id);
         const dbRows = await prisma.entra_directory_users.findMany({
-          where: { source_id: sourceId, agency_id: tenantId },
+          where: { source_id: sourceId, agency_id: tenantId, entra_user_id: { in: graphUserIds } },
           select: { entra_user_id: true, raw_attributes: true },
         });
         const mfaByGraphId = new Map<string, unknown>(
