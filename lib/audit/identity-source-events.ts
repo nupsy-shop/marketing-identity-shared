@@ -20,10 +20,11 @@
  * encounters HTTP 403 from the Graph /authentication/methods endpoint.
  *
  * Indicates that `UserAuthenticationMethod.Read.All` has not been consented
- * by the tenant admin. The identity source's
- * `metadata.entraMfaConsentMissing` flag will be set to true.
+ * by the tenant admin. Consent state is canonical in
+ * `identity_sources.granted_scopes`; the UI derives the re-consent banner
+ * from that column directly. This event is an operator alarm only.
  *
- * Consumers: UI banner on identity source settings page; SIEM forwarding.
+ * Consumers: SIEM forwarding; operator log monitoring.
  *
  * Top-level shape:
  *   {

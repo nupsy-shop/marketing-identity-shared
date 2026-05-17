@@ -149,9 +149,12 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     const mfaClient: GraphMfaClient = {
       async fetchUsers() {
         const graphUsers = await fetchUsers(accessToken);
-        // Enrich with current raw_attributes.mfa from DB so TTL check works.
+        // Scope DB read to only the users Graph returned this run.
+        // Previously this was an unfiltered scan of the full tenant table;
+        // for large tenants that was significant wasted I/O on every sync.
+        const graphUserIds = graphUsers.map((u) => u.id);
         const dbRows = await prisma.entra_directory_users.findMany({
-          where: { source_id: sourceId, agency_id: tenantId },
+          where: { source_id: sourceId, agency_id: tenantId, entra_user_id: { in: graphUserIds } },
           select: { entra_user_id: true, raw_attributes: true },
         });
         const mfaByGraphId = new Map<string, unknown>(
@@ -190,7 +193,13 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     const syncRunId = `entra_sync_directory:${job.id}`;
     const mfaResult = await fetchUsersWithMfa(mfaClient, { agencyId: tenantId, now: Date.now() });
 
-    // Handle consent-missing: emit audit event + flag the source
+    // Handle consent-missing: emit audit event only.
+    // Consent state is canonical in identity_sources.granted_scopes (written by
+    // the OAuth callback). The UI derives the re-consent banner from granted_scopes
+    // directly, so we must NOT write a derived flag here — that duplication was
+    // the source of a race condition (sync could overwrite a freshly-granted scope
+    // before the OAuth callback completed). The audit event is preserved as a
+    // runtime operator alarm; it is not the source of truth.
     if (mfaResult.consentMissing) {
       // Users that had a 403 are those without MFA data after the sync.
       const affectedCount = mfaResult.users.filter((u) => !u.raw_attributes.mfa).length;
@@ -206,31 +215,9 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         context: { syncRunId, affectedUserCount: affectedCount },
       }).catch((err) => logger.error({ err, tenantId, sourceId }, 'failed to publish entra.mfa_scope_missing audit event'));
 
-      // Flag the source so the UI can show the re-consent banner.
-      const currentMeta = (source.metadata ?? {}) as Record<string, unknown>;
-      await prisma.identity_sources.update({
-        where: { id: sourceId },
-        data: {
-          metadata: { ...currentMeta, entraMfaConsentMissing: true } as never,
-          updated_at: new Date(),
-        },
-      }).catch((err) => logger.error({ err, sourceId }, 'failed to update identity_sources.metadata.entraMfaConsentMissing'));
-
       logger.warn('entra_sync_directory: UserAuthenticationMethod.Read.All consent missing — MFA data will not be synced', {
         tenantId, sourceId,
       });
-    } else {
-      // Clear the consent-missing flag if previously set.
-      const currentMeta = (source.metadata ?? {}) as Record<string, unknown>;
-      if (currentMeta.entraMfaConsentMissing === true) {
-        await prisma.identity_sources.update({
-          where: { id: sourceId },
-          data: {
-            metadata: { ...currentMeta, entraMfaConsentMissing: false } as never,
-            updated_at: new Date(),
-          },
-        }).catch(() => {});
-      }
     }
 
     // Extract the EntraUser shape from mfaResult.users (raw_attributes holds
