@@ -195,6 +195,7 @@ export async function fetchGroupMembers(
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const BATCH_SIZE = 20;
+const MAX_RETRY_AFTER_MS = 30_000;
 
 /** Injectable context for testability (agencyId for logging, now for TTL). */
 export interface MfaSyncContext {
@@ -277,10 +278,25 @@ export async function fetchUsersWithMfa(
       let resp = await client.batch(req);
       let parsed = parseBatchResponse(resp);
 
-      // If any users in this chunk were throttled, retry the whole chunk once.
-      // The client is responsible for honoring any Retry-After header if it
-      // chooses; here we just re-issue immediately (tests pass Retry-After: 0).
+      // If any users in this chunk were throttled, honor the Retry-After header
+      // from the first throttled inner response, wait up to MAX_RETRY_AFTER_MS,
+      // then retry the whole chunk once. Persistent 429 → those users are skipped
+      // this run; their mfa.syncedAt stays stale and the next run picks them up.
       if (parsed.throttledFor.length > 0) {
+        // Find the largest Retry-After among throttled inner responses (seconds).
+        let retryAfterMs = 0;
+        for (const r of resp.responses) {
+          if (r.status === 429 && r.headers?.['Retry-After']) {
+            const seconds = parseInt(r.headers['Retry-After'], 10);
+            if (!isNaN(seconds) && seconds > 0) {
+              retryAfterMs = Math.max(retryAfterMs, seconds * 1000);
+            }
+          }
+        }
+        const waitMs = Math.min(retryAfterMs, MAX_RETRY_AFTER_MS);
+        if (waitMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+        }
         resp = await client.batch(req);
         parsed = parseBatchResponse(resp);
         // After second attempt, throttledFor users are simply skipped — their

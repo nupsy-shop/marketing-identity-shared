@@ -3,9 +3,9 @@
  *
  * Uses a mock GraphMfaClient to isolate the logic from real Graph API calls.
  * Covers: 200 persist, TTL skip, 403 preserves prior + flags consent,
- * 429 retry-once success, persistent 429 skip.
+ * 429 retry-once success, persistent 429 skip, Retry-After wait.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fetchUsersWithMfa } from './directory.js';
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -128,5 +128,66 @@ describe('fetchUsersWithMfa', () => {
     const result = await fetchUsersWithMfa(graphClient, { agencyId: 'agency-1', now: Date.now() });
     expect(graphClient.batch).toHaveBeenCalledTimes(2); // initial + 1 retry
     expect(result.users[0].raw_attributes.mfa).toBeUndefined();
+  });
+
+  it('waits Retry-After seconds before retrying a 429 batch', async () => {
+    vi.useFakeTimers();
+
+    graphClient.fetchUsers.mockResolvedValue([
+      { id: 'u1', userPrincipalName: 'alice@example.com', raw_attributes: {} },
+    ]);
+    graphClient.batch
+      .mockResolvedValueOnce({
+        responses: [{ id: 'u1', status: 429, headers: { 'Retry-After': '1' }, body: {} }],
+      })
+      .mockResolvedValueOnce({
+        responses: [
+          {
+            id: 'u1',
+            status: 200,
+            body: { value: [{ '@odata.type': '#microsoft.graph.fido2AuthenticationMethod' }] },
+          },
+        ],
+      });
+
+    // Start the call — it will pause at the setTimeout waiting for 1s.
+    const resultPromise = fetchUsersWithMfa(graphClient, { agencyId: 'agency-1', now: Date.now() });
+
+    // The first batch call should have fired; retry hasn't happened yet.
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const result = await resultPromise;
+
+    expect(graphClient.batch).toHaveBeenCalledTimes(2);
+    expect(result.users[0].raw_attributes.mfa?.enrolled).toBe(true);
+
+    vi.useRealTimers();
+  });
+
+  it('caps Retry-After wait at 30 s to prevent indefinite hangs', async () => {
+    vi.useFakeTimers();
+
+    graphClient.fetchUsers.mockResolvedValue([
+      { id: 'u1', userPrincipalName: 'alice@example.com', raw_attributes: {} },
+    ]);
+    graphClient.batch
+      .mockResolvedValueOnce({
+        // Extremely large Retry-After — should be capped at 30s.
+        responses: [{ id: 'u1', status: 429, headers: { 'Retry-After': '9999' }, body: {} }],
+      })
+      .mockResolvedValueOnce({
+        responses: [{ id: 'u1', status: 200, body: { value: [] } }],
+      });
+
+    const resultPromise = fetchUsersWithMfa(graphClient, { agencyId: 'agency-1', now: Date.now() });
+
+    // Advance exactly 30 s — the cap — not 9999 s.
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const result = await resultPromise;
+    expect(graphClient.batch).toHaveBeenCalledTimes(2);
+    expect(result.users[0].raw_attributes.mfa).toBeDefined();
+
+    vi.useRealTimers();
   });
 });
