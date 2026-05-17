@@ -2,9 +2,21 @@
  * Microsoft Graph API — Directory Sync Helpers
  *
  * Provides paginated fetchers for users, groups, and group members
- * used during Entra ID directory sync operations.
+ * used during Entra ID directory sync operations. Also exports
+ * fetchUsersWithMfa which layers MFA enrollment data on top of the
+ * base fetchUsers call via Graph $batch on /authentication/methods.
+ *
  * No @/ aliases — plain ESM with .js extensions.
  */
+
+import {
+  buildBatchRequest,
+  chunkBatch,
+  parseBatchResponse,
+  type MfaClassification,
+  type BatchRequest,
+  type BatchResponse,
+} from './auth-methods.js';
 
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 
@@ -171,4 +183,131 @@ export async function fetchGroupMembers(
       mail: m.mail,
       accountEnabled: m.accountEnabled,
     }));
+}
+
+// ---------------------------------------------------------------------------
+// fetchUsersWithMfa — fetches users then layers MFA enrollment via $batch
+// ---------------------------------------------------------------------------
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const BATCH_SIZE = 20;
+
+/** Injectable context for testability (agencyId for logging, now for TTL). */
+export interface MfaSyncContext {
+  agencyId: string;
+  /** Current epoch ms — injectable for deterministic tests. */
+  now: number;
+}
+
+/** Shape of a user object as seen by fetchUsersWithMfa. */
+export interface MfaUser {
+  id: string;
+  userPrincipalName?: string;
+  raw_attributes: Record<string, unknown> & {
+    mfa?: { enrolled: boolean; methods: string[]; syncedAt: string };
+  };
+}
+
+/** Return value of fetchUsersWithMfa. */
+export interface MfaSyncResult {
+  users: MfaUser[];
+  /** True if any inner response returned 403 (UserAuthenticationMethod.Read.All not consented). */
+  consentMissing: boolean;
+}
+
+/**
+ * Interface for the Graph client passed to fetchUsersWithMfa. Kept minimal
+ * so callers can inject mocks in tests without wiring the full fetch stack.
+ *
+ * - fetchUsers() returns the raw user list (id + userPrincipalName + raw_attributes).
+ * - batch(req) POSTs to /$batch and returns the response JSON.
+ */
+export interface GraphMfaClient {
+  fetchUsers(): Promise<MfaUser[]>;
+  batch(req: BatchRequest): Promise<BatchResponse>;
+}
+
+/**
+ * Returns true when the user's mfa.syncedAt is within the last hour.
+ * A missing or unparseable syncedAt is treated as stale (returns false).
+ */
+function isMfaFresh(user: MfaUser, nowMs: number): boolean {
+  const ts = user.raw_attributes?.mfa?.syncedAt;
+  if (!ts) return false;
+  const age = nowMs - new Date(ts).getTime();
+  return age >= 0 && age < ONE_HOUR_MS;
+}
+
+/**
+ * Fetch all users via fetchUsers(), then for users whose MFA data is stale
+ * or absent, fan out /authentication/methods calls via Graph $batch (20/req,
+ * 1h TTL). Persists classification into raw_attributes.mfa.
+ *
+ * 403 handling: sets consentMissing=true, preserves the user's prior
+ *   raw_attributes.mfa (no overwrite). The orchestrator should emit an
+ *   entra.mfa_scope_missing audit event and flag the identity source.
+ *
+ * 429 handling: retries the chunk once. Persistent 429 → skips those users
+ *   this run (their mfa.syncedAt stays stale; next run picks them up).
+ */
+export async function fetchUsersWithMfa(
+  client: GraphMfaClient,
+  ctx: MfaSyncContext,
+): Promise<MfaSyncResult> {
+  const users = await client.fetchUsers();
+
+  // Separate fresh (TTL cache hit) from stale users
+  const staleUsers = users.filter((u) => !isMfaFresh(u, ctx.now));
+
+  let consentMissing = false;
+  const classifications = new Map<string, MfaClassification>();
+
+  if (staleUsers.length > 0) {
+    const chunks = chunkBatch(
+      staleUsers.map((u) => u.id),
+      BATCH_SIZE,
+    );
+
+    for (const chunk of chunks) {
+      const req = buildBatchRequest(chunk);
+      let resp = await client.batch(req);
+      let parsed = parseBatchResponse(resp);
+
+      // If any users in this chunk were throttled, retry the whole chunk once.
+      // The client is responsible for honoring any Retry-After header if it
+      // chooses; here we just re-issue immediately (tests pass Retry-After: 0).
+      if (parsed.throttledFor.length > 0) {
+        resp = await client.batch(req);
+        parsed = parseBatchResponse(resp);
+        // After second attempt, throttledFor users are simply skipped — their
+        // mfa stays at whatever prior value it had (or undefined).
+      }
+
+      if (parsed.consentMissingFor.length > 0) consentMissing = true;
+
+      for (const [id, cls] of parsed.classifications) {
+        classifications.set(id, cls);
+      }
+    }
+  }
+
+  const syncedAt = new Date(ctx.now).toISOString();
+
+  // Merge classifications back onto users.
+  // - Users with a fresh classification: update raw_attributes.mfa.
+  // - Users with no classification (TTL fresh, 403, persistent 429, other error):
+  //   keep their existing raw_attributes unchanged.
+  const outUsers: MfaUser[] = users.map((u) => {
+    const cls = classifications.get(u.id);
+    if (!cls) return u; // keep prior mfa (or undefined)
+    return {
+      ...u,
+      raw_attributes: {
+        ...u.raw_attributes,
+        mfa: { enrolled: cls.enrolled, methods: cls.methods, syncedAt },
+      },
+    };
+  });
+
+  return { users: outUsers, consentMissing };
 }
