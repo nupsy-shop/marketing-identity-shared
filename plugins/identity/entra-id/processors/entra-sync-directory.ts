@@ -190,7 +190,13 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     const syncRunId = `entra_sync_directory:${job.id}`;
     const mfaResult = await fetchUsersWithMfa(mfaClient, { agencyId: tenantId, now: Date.now() });
 
-    // Handle consent-missing: emit audit event + flag the source
+    // Handle consent-missing: emit audit event only.
+    // Consent state is canonical in identity_sources.granted_scopes (written by
+    // the OAuth callback). The UI derives the re-consent banner from granted_scopes
+    // directly, so we must NOT write a derived flag here — that duplication was
+    // the source of a race condition (sync could overwrite a freshly-granted scope
+    // before the OAuth callback completed). The audit event is preserved as a
+    // runtime operator alarm; it is not the source of truth.
     if (mfaResult.consentMissing) {
       // Users that had a 403 are those without MFA data after the sync.
       const affectedCount = mfaResult.users.filter((u) => !u.raw_attributes.mfa).length;
@@ -206,31 +212,9 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         context: { syncRunId, affectedUserCount: affectedCount },
       }).catch((err) => logger.error({ err, tenantId, sourceId }, 'failed to publish entra.mfa_scope_missing audit event'));
 
-      // Flag the source so the UI can show the re-consent banner.
-      const currentMeta = (source.metadata ?? {}) as Record<string, unknown>;
-      await prisma.identity_sources.update({
-        where: { id: sourceId },
-        data: {
-          metadata: { ...currentMeta, entraMfaConsentMissing: true } as never,
-          updated_at: new Date(),
-        },
-      }).catch((err) => logger.error({ err, sourceId }, 'failed to update identity_sources.metadata.entraMfaConsentMissing'));
-
       logger.warn('entra_sync_directory: UserAuthenticationMethod.Read.All consent missing — MFA data will not be synced', {
         tenantId, sourceId,
       });
-    } else {
-      // Clear the consent-missing flag if previously set.
-      const currentMeta = (source.metadata ?? {}) as Record<string, unknown>;
-      if (currentMeta.entraMfaConsentMissing === true) {
-        await prisma.identity_sources.update({
-          where: { id: sourceId },
-          data: {
-            metadata: { ...currentMeta, entraMfaConsentMissing: false } as never,
-            updated_at: new Date(),
-          },
-        }).catch(() => {});
-      }
     }
 
     // Extract the EntraUser shape from mfaResult.users (raw_attributes holds
