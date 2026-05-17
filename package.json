@@ -2,5 +2,10 @@
   "name": "marketing-identity-shared",
   "version": "1.0.0",
   "description": "Shared libraries for marketing-identity web app and Bull worker",
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "@vitest/runner": "^4.1.6",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
 }
