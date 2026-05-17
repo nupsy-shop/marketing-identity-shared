@@ -213,7 +213,7 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         agency: { id: tenantId },
         resource: { type: 'identity_source', id: sourceId },
         context: { syncRunId, affectedUserCount: affectedCount },
-      }).catch((err) => logger.error({ err, tenantId, sourceId }, 'failed to publish entra.mfa_scope_missing audit event'));
+      }).catch((err) => logger.error('failed to publish entra.mfa_scope_missing audit event', { err, tenantId, sourceId }));
 
       logger.warn('entra_sync_directory: UserAuthenticationMethod.Read.All consent missing — MFA data will not be synced', {
         tenantId, sourceId,
