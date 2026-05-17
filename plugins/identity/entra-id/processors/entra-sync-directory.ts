@@ -220,15 +220,20 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
       });
     }
 
-    // Extract the EntraUser shape from mfaResult.users (raw_attributes holds
-    // the full Graph user fields we spread in via mfaClient.fetchUsers above).
-    // MFA data (raw_attributes.mfa) is passed through to upsertEntraDirectoryUser
-    // so it is persisted atomically with the rest of the user record.
-    users = mfaResult.users.map((mu) => {
-      // raw_attributes was built as { ...graphUser, mfa? }; extract EntraUser fields.
-      const ra = mu.raw_attributes as EntraUser & { mfa?: unknown };
-      return ra as EntraUser;
-    });
+    // Build a parallel Map<userId, mfa> from mfaResult so the EntraUser[]
+    // array stays typed correctly (no mutation of EntraUser shape needed).
+    // The mfa classification is applied inside upsertEntraDirectoryUser so it
+    // is persisted atomically with the rest of the user record.
+    const mfaByUserId = new Map<string, { enrolled: boolean; methods: string[]; syncedAt: string } | undefined>(
+      mfaResult.users.map((mu) => [mu.id, mu.raw_attributes.mfa]),
+    );
+
+    // Extract EntraUser fields from raw_attributes (which was constructed as
+    // { ...graphUser, mfa? } in mfaClient.fetchUsers). We can safely cast
+    // raw_attributes through unknown to EntraUser here because raw_attributes
+    // was built by spreading the Graph EntraUser object — all required fields
+    // are present at runtime. The mfa key is tracked separately via mfaByUserId.
+    users = mfaResult.users.map((mu) => mu.raw_attributes as unknown as EntraUser);
 
     for (const user of users) {
       const email = (user.mail || user.userPrincipalName)?.toLowerCase();
@@ -243,10 +248,9 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         select: { department: true, job_title: true, is_active: true },
       });
 
-      // Pass mfa data through so upsertEntraDirectoryUser includes it
-      // in raw_attributes (the upsert writes raw_attributes = user as any,
-      // so the mfa key carried on the user object is persisted automatically).
-      await upsertEntraDirectoryUser(sourceId, tenantId, user);
+      // Look up the MFA classification from the parallel Map and pass it
+      // to the upsert so it is included in raw_attributes atomically.
+      await upsertEntraDirectoryUser(sourceId, tenantId, user, mfaByUserId.get(user.id));
 
       // Track attribute changes for mover detection
       if (existingUser) {
@@ -481,10 +485,17 @@ async function upsertEntraDirectoryUser(
   sourceId: string,
   agencyId: string,
   user: EntraUser,
+  mfa?: { enrolled: boolean; methods: string[]; syncedAt: string },
 ): Promise<void> {
   const { prisma } = getRuntime();
   const email = (user.mail || user.userPrincipalName)?.toLowerCase();
   if (!email) return;
+
+  // Build raw_attributes as a plain object so we can attach mfa without
+  // mutating the typed EntraUser. The spread preserves all Graph fields;
+  // mfa is omitted when undefined (no MFA data for this run).
+  const rawAttributes: Record<string, unknown> = { ...user };
+  if (mfa !== undefined) rawAttributes.mfa = mfa;
 
   // Tri-state DirectoryUser.status migration (PR B):
   //   is_active          → reflects Graph's accountEnabled only (admin
@@ -511,7 +522,7 @@ async function upsertEntraDirectoryUser(
       is_present_in_idp: true,
       entra_user_id: user.id,
       user_principal_name: user.userPrincipalName ?? null,
-      raw_attributes: user as any,
+      raw_attributes: rawAttributes,
       updated_at: new Date(),
       last_synced_at: new Date(),
     },
@@ -527,7 +538,7 @@ async function upsertEntraDirectoryUser(
       is_present_in_idp: true,
       entra_user_id: user.id,
       user_principal_name: user.userPrincipalName ?? null,
-      raw_attributes: user as any,
+      raw_attributes: rawAttributes,
       last_synced_at: new Date(),
       agency_id: agencyId,
     },
