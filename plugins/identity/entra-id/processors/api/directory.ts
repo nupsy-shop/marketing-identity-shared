@@ -18,6 +18,10 @@ import {
   type BatchResponse,
 } from './auth-methods.js';
 
+// Re-export BatchResponse so callers (e.g., entra-sync-directory.ts) can
+// reference it without importing auth-methods directly.
+export type { BatchResponse } from './auth-methods.js';
+
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 
 async function handleGraphError(res: Response): Promise<never> {

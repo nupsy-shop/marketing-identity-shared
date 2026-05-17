@@ -13,14 +13,18 @@
 import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
+import { ENTRA_MFA_SCOPE_MISSING } from '../../../../lib/audit/identity-source-events.js';
 import { resolveEntraAccessToken } from './resolve-access-token.js';
 import {
   fetchUsers,
   fetchGroups,
   fetchGroupMembers,
+  fetchUsersWithMfa,
   type EntraUser,
   type EntraGroup,
   type EntraMember,
+  type GraphMfaClient,
+  type BatchResponse,
 } from './api/directory.js';
 
 interface JobResult {
@@ -137,7 +141,107 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
     // 3. Fetch and upsert users
     if (syncUsersEnabled) {
     const seenEmails = new Set<string>();
-    users = await fetchUsers(accessToken);
+
+    // Build a GraphMfaClient adapter that bridges the access-token-based
+    // Graph calls with the injectable interface expected by fetchUsersWithMfa.
+    // The fetchUsers() call pulls raw_attributes.mfa from the DB for TTL
+    // checking; the batch() call fans out /authentication/methods via $batch.
+    const mfaClient: GraphMfaClient = {
+      async fetchUsers() {
+        const graphUsers = await fetchUsers(accessToken);
+        // Enrich with current raw_attributes.mfa from DB so TTL check works.
+        const dbRows = await prisma.entra_directory_users.findMany({
+          where: { source_id: sourceId, agency_id: tenantId },
+          select: { entra_user_id: true, raw_attributes: true },
+        });
+        const mfaByGraphId = new Map<string, unknown>(
+          dbRows.map((r: { entra_user_id: string; raw_attributes: unknown }) => [
+            r.entra_user_id,
+            (r.raw_attributes as Record<string, unknown>)?.mfa,
+          ]),
+        );
+        return graphUsers.map((u) => ({
+          id: u.id,
+          userPrincipalName: u.userPrincipalName,
+          raw_attributes: {
+            ...u,
+            mfa: mfaByGraphId.get(u.id) as { enrolled: boolean; methods: string[]; syncedAt: string } | undefined,
+          },
+        }));
+      },
+      async batch(req) {
+        const GRAPH_BATCH = 'https://graph.microsoft.com/v1.0/$batch';
+        const res = await fetch(GRAPH_BATCH, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(req),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => 'Unable to read error body');
+          throw new Error(`Graph $batch error (${res.status}): ${text.slice(0, 300)}`);
+        }
+        return res.json() as Promise<import('./api/directory.js').BatchResponse>;
+      },
+    };
+
+    const syncRunId = `entra_sync_directory:${job.id}`;
+    const mfaResult = await fetchUsersWithMfa(mfaClient, { agencyId: tenantId, now: Date.now() });
+
+    // Handle consent-missing: emit audit event + flag the source
+    if (mfaResult.consentMissing) {
+      // Users that had a 403 are those without MFA data after the sync.
+      const affectedCount = mfaResult.users.filter((u) => !u.raw_attributes.mfa).length;
+
+      publishAuditEvent({
+        eventType: ENTRA_MFA_SCOPE_MISSING,
+        action: 'scope_missing',
+        source: 'entra_sync_directory',
+        severity: 'warn',
+        actor: { id: null, type: 'system' },
+        agency: { id: tenantId },
+        resource: { type: 'identity_source', id: sourceId },
+        context: { syncRunId, affectedUserCount: affectedCount },
+      }).catch(() => {});
+
+      // Flag the source so the UI can show the re-consent banner.
+      const currentMeta = (source.metadata ?? {}) as Record<string, unknown>;
+      await prisma.identity_sources.update({
+        where: { id: sourceId },
+        data: {
+          metadata: { ...currentMeta, entraMfaConsentMissing: true } as never,
+          updated_at: new Date(),
+        },
+      }).catch(() => {});
+
+      logger.warn('entra_sync_directory: UserAuthenticationMethod.Read.All consent missing — MFA data will not be synced', {
+        tenantId, sourceId,
+      });
+    } else {
+      // Clear the consent-missing flag if previously set.
+      const currentMeta = (source.metadata ?? {}) as Record<string, unknown>;
+      if (currentMeta.entraMfaConsentMissing === true) {
+        await prisma.identity_sources.update({
+          where: { id: sourceId },
+          data: {
+            metadata: { ...currentMeta, entraMfaConsentMissing: false } as never,
+            updated_at: new Date(),
+          },
+        }).catch(() => {});
+      }
+    }
+
+    // Extract the EntraUser shape from mfaResult.users (raw_attributes holds
+    // the full Graph user fields we spread in via mfaClient.fetchUsers above).
+    // MFA data (raw_attributes.mfa) is passed through to upsertEntraDirectoryUser
+    // so it is persisted atomically with the rest of the user record.
+    users = mfaResult.users.map((mu) => {
+      // raw_attributes was built as { ...graphUser, mfa? }; extract EntraUser fields.
+      const ra = mu.raw_attributes as EntraUser & { mfa?: unknown };
+      return ra as EntraUser;
+    });
 
     for (const user of users) {
       const email = (user.mail || user.userPrincipalName)?.toLowerCase();
@@ -152,6 +256,9 @@ export default async function entraSyncDirectory(job: Bull.Job): Promise<JobResu
         select: { department: true, job_title: true, is_active: true },
       });
 
+      // Pass mfa data through so upsertEntraDirectoryUser includes it
+      // in raw_attributes (the upsert writes raw_attributes = user as any,
+      // so the mfa key carried on the user object is persisted automatically).
       await upsertEntraDirectoryUser(sourceId, tenantId, user);
 
       // Track attribute changes for mover detection
