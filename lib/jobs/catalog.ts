@@ -205,10 +205,20 @@ export const JOB_CATALOG = {
   slack_notify:    { queue: QUEUE_NAMES.NOTIFICATIONS },
 
   // ─── Bulk Ops (tenant-scoped, user-initiated) ───────────────────────
-  identity_sync:  { queue: QUEUE_NAMES.BULK_OPS },
-  bulk_provision: { queue: QUEUE_NAMES.BULK_OPS },
-  bulk_revoke:    { queue: QUEUE_NAMES.BULK_OPS },
-  audit_export:   { queue: QUEUE_NAMES.BULK_OPS },
+  identity_sync:    { queue: QUEUE_NAMES.BULK_OPS },
+  bulk_provision:   { queue: QUEUE_NAMES.BULK_OPS },
+  // CSV-import flow (POST /api/agency/bulk-import). Distinct from
+  // `bulk_provision` because the two handlers have completely different
+  // payload shapes — bulk_provision is the Keycloak user provisioner
+  // ({tenantId, realm, identityIds, users}), bulk_csv_import is the
+  // CSV-row processor ({tenantId, importType, rows, actor}). Sharing the
+  // same job_type caused both handlers to race on the same Bull queue:
+  // bull's bulk-provision.ts picked CSV-import jobs up, returned
+  // 'completed' without writing counts, and the run-bull-job-harness
+  // hit a terminal-state row with result=null. See #1405.
+  bulk_csv_import:  { queue: QUEUE_NAMES.BULK_OPS },
+  bulk_revoke:      { queue: QUEUE_NAMES.BULK_OPS },
+  audit_export:     { queue: QUEUE_NAMES.BULK_OPS },
 
   // ─── System (no tenantId) ───────────────────────────────────────────
   dispatch_poll_audits:       { queue: QUEUE_NAMES.SYSTEM },
