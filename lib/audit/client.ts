@@ -111,7 +111,24 @@ const INDEX_TEMPLATE = {
       'resource.type': { type: 'keyword' },
       'resource.id':   { type: 'keyword' },
       'resource.name': { type: 'text', fields: { keyword: { type: 'keyword' } } },
-      context: { type: 'object', enabled: true },
+      // `context` is a free-form payload whose shape varies per
+      // `eventType` (drift_maintenance_completed has `skipped: number`,
+      // remediation.skipped has `skipped: <missing>`, gateway events
+      // have nested objects, etc.). With dynamic mapping enabled and no
+      // declared sub-properties, ES auto-infers a type for each path on
+      // first sight and rejects subsequent docs whose path has a
+      // different type — see prod failures of
+      //   "object mapping for [context.skipped] tried to parse field
+      //    [skipped] as object, but found a concrete value"
+      // We don't query / aggregate on `context.<field>` at the index
+      // level — readers always rely on `_source` — so `enabled: false`
+      // is the right setting: keep the payload in `_source`, skip
+      // indexing of its sub-fields, no dynamic-type conflicts ever.
+      // Applies to NEW indices only (templates only fire at index
+      // creation); existing monthly indices keep their inferred mapping
+      // until the next rollover. To force-heal a current index, drop +
+      // recreate it (operational, not in this code change).
+      context: { type: 'object', enabled: false },
       eventHash: { type: 'keyword' },
       prevHash:  { type: 'keyword' },
       retentionDays: { type: 'integer' },
