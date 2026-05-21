@@ -9,6 +9,11 @@
 import { getRuntime } from '../runtime.js';
 import { Prisma } from '@prisma/client';
 import { publishAuditEvent } from '../audit/publisher.js';
+import * as triggerExecutor from './steps/trigger.js';
+import * as actionExecutor from './steps/action.js';
+import * as approvalExecutor from './steps/approval.js';
+import * as conditionExecutor from './steps/condition.js';
+import * as notificationExecutor from './steps/notification.js';
 import type {
   StepDefinition,
   StepExecutor,
@@ -17,21 +22,32 @@ import type {
   WorkflowInstance,
 } from './types.js';
 
-// Step executor registry — lazy-loaded
-const executors: Record<string, StepExecutor> = {};
+// Step executor registry — STATICALLY imported.
+//
+// These MUST be static imports, not a dynamic `import(`./steps/${type}.js`)`.
+// A template-string dynamic import cannot be statically traced by bundlers, so
+// the Next.js server build never includes the step modules — at runtime the
+// import throws "Cannot find module './trigger.js'" and getExecutor returns
+// null, failing the workflow at step-1 before any work happens. This only bit
+// workflows started *synchronously inside the Next.js bundle* (the revert API
+// route → startWorkflow); the Bull worker runs under plain Node where the
+// dynamic import resolved, which is why it went unnoticed. See issue #1455.
+const executors: Record<string, StepExecutor> = {
+  trigger: triggerExecutor as StepExecutor,
+  action: actionExecutor as StepExecutor,
+  approval: approvalExecutor as StepExecutor,
+  condition: conditionExecutor as StepExecutor,
+  notification: notificationExecutor as StepExecutor,
+};
 
-async function getExecutor(stepType: string): Promise<StepExecutor | null> {
-  if (executors[stepType]) return executors[stepType];
-
-  const { logger } = getRuntime();
-  try {
-    const mod: StepExecutor = await import(`./steps/${stepType}.js`);
-    executors[stepType] = mod;
-    return mod;
-  } catch (err) {
-    logger.error(`[Workflow Engine] No executor for step type: ${stepType}`, { message: (err as Error).message });
+export function getExecutor(stepType: string): StepExecutor | null {
+  const mod = executors[stepType];
+  if (!mod) {
+    const { logger } = getRuntime();
+    logger.error(`[Workflow Engine] No executor for step type: ${stepType}`);
     return null;
   }
+  return mod;
 }
 
 // ---- Start Workflow --------------------------------------------------------
