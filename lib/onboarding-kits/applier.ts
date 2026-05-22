@@ -24,6 +24,10 @@
 import { getRuntime } from '../runtime.js';
 import { publishAuditEvent } from '../audit/publisher.js';
 import { dispatchNotification } from '../notifications/dispatch.js';
+import {
+  IdentityOwnership,
+  IdentityProvisioningStatus,
+} from '../provisioning-types.js';
 import * as kitCrud from './crud.js';
 import {
   RUN_STEP_ORDER,
@@ -94,6 +98,13 @@ export interface ApplyKitDeps {
   installTemplates: (agencyId: string, clientId: string, templateKeys: string[]) => Promise<number>;
   /** Create team-member rows (csv → users + client_role_assignments; directory → client_role_assignments only). */
   createTeam: (agencyId: string, clientId: string, members: TeamMemberInput[], actorId: string | null) => Promise<Array<{ email: string; appUserId: string | null; created: boolean; error?: string }>>;
+  /**
+   * Upsert the per-member provisioning row in integration_identities so a
+   * later read (and the production bulk_provision worker) has a row to
+   * transition. One row per (client, member); seeded as PENDING. Idempotent on
+   * re-apply via the deterministic (identifier, type) unique key.
+   */
+  upsertMemberProvisioning: (agencyId: string, clientId: string, appUserId: string, email: string) => Promise<void>;
   /** Enqueue a bulk_provision job per team member — inherits #61 parallelization. */
   enqueueMemberProvision: (agencyId: string, clientId: string, appUserId: string, email: string) => Promise<string | null>;
   /** Snapshot per-member provisioning outcomes from integration_identities. */
@@ -235,6 +246,38 @@ const realDeps: ApplyKitDeps = {
     return outcomes;
   },
 
+  async upsertMemberProvisioning(agencyId, clientId, appUserId, email) {
+    const { prisma } = getRuntime();
+    // Deterministic identity key per (client, member) so re-applying the same
+    // kit is idempotent (mirrors lib/campaigns/provisioner.ts's per-grant
+    // identifier scheme + the (identifier, type) unique index).
+    const identifier = `onboarding-kit:${clientId}:${appUserId}`;
+    const now = new Date();
+    await prisma.integration_identities.upsert({
+      where: { identifier_type: { identifier, type: 'CLIENT_TEAM_MEMBER' } },
+      update: {
+        // Re-apply: reset the in-flight marker so the worker re-evaluates.
+        // Per-provider detail lives in provisioning_providers_status; the
+        // top-level provisioning_status is the derived aggregate.
+        provisioning_status: IdentityProvisioningStatus.PENDING,
+        updatedAt: now,
+      },
+      create: {
+        agency_id: agencyId,
+        client_id: clientId,
+        app_user_id: appUserId,
+        type: 'CLIENT_TEAM_MEMBER',
+        name: email,
+        identifier,
+        isActive: true,
+        ownership: IdentityOwnership.CLIENT_DEDICATED,
+        provisioning_status: IdentityProvisioningStatus.PENDING,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+  },
+
   async enqueueMemberProvision(agencyId, clientId, appUserId, email) {
     // Fans out via existing bulk_provision queue — inherits #61 parallelization.
     const { enqueueJob } = getRuntime();
@@ -252,16 +295,17 @@ const realDeps: ApplyKitDeps = {
     if (appUserIds.length === 0) return new Map();
     const { prisma } = getRuntime();
     const rows = await prisma.integration_identities.findMany({
-      where: { agency_id: agencyId, client_id: clientId, app_user_id: { in: appUserIds } } as never,
-      select: { app_user_id: true, provisioning_status: true } as never,
-    }) as Array<{ app_user_id: string; provisioning_status: string }>;
+      where: { agency_id: agencyId, client_id: clientId, app_user_id: { in: appUserIds } },
+      select: { app_user_id: true, provisioning_status: true },
+    });
 
     const out = new Map<string, { succeededCount: number; failedCount: number }>();
     for (const uid of appUserIds) out.set(uid, { succeededCount: 0, failedCount: 0 });
     for (const r of rows) {
+      if (!r.app_user_id) continue;
       const cur = out.get(r.app_user_id) || { succeededCount: 0, failedCount: 0 };
-      if (r.provisioning_status === 'PROVISIONED') cur.succeededCount += 1;
-      else if (r.provisioning_status === 'ERROR') cur.failedCount += 1;
+      if (r.provisioning_status === IdentityProvisioningStatus.PROVISIONED) cur.succeededCount += 1;
+      else if (r.provisioning_status === IdentityProvisioningStatus.ERROR) cur.failedCount += 1;
       out.set(r.app_user_id, cur);
     }
     return out;
@@ -380,6 +424,16 @@ export async function applyKit(
   const provisionableUserIds: string[] = [];
   for (const o of teamOutcomes) {
     if (o.created && o.appUserId) {
+      // Seed the per-member integration_identities row (PENDING) BEFORE the
+      // fan-out so readProvisionOutcomes — and the production bulk_provision
+      // worker — have a row to read/transition. A failure here is recorded
+      // per-member and must NOT halt the kit (partial failure invariant).
+      try {
+        await deps.upsertMemberProvisioning(ctx.agencyId, ctx.clientId, o.appUserId, o.email);
+      } catch (err: unknown) {
+        logger.warn('[applyKit] member provisioning upsert failed:', { email: o.email, err: err instanceof Error ? err.message : String(err) });
+        continue;
+      }
       const jobId = await deps.enqueueMemberProvision(ctx.agencyId, ctx.clientId, o.appUserId, o.email);
       if (jobId) provisionableUserIds.push(o.appUserId);
     }
