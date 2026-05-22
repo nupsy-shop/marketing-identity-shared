@@ -42,6 +42,26 @@ function baseUrl(): string | undefined {
   return process.env.KEYCLOAK_ADMIN_BASE_URL;
 }
 
+const DEFAULT_ADMIN_TIMEOUT_MS = 15_000;
+
+function adminTimeoutMs(): number {
+  const raw = process.env.KEYCLOAK_ADMIN_TIMEOUT_MS;
+  const n = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_ADMIN_TIMEOUT_MS;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+  const ms = adminTimeoutMs();
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error(`Keycloak admin request timed out after ${ms}ms: ${url}`);
+    }
+    throw err;
+  }
+}
+
 export function isKeycloakAdminConfigured(): boolean {
   return !!(
     process.env.KEYCLOAK_ADMIN_BASE_URL &&
@@ -85,7 +105,7 @@ async function getAdminToken(): Promise<string> {
     });
   }
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
@@ -161,7 +181,7 @@ export async function adminFetch(realm: string, path: string, options?: RequestI
   if (overrideRes) return overrideRes;
 
   const token = await getAdminToken();
-  return fetch(url, {
+  return fetchWithTimeout(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -178,7 +198,7 @@ export async function adminFetch(realm: string, path: string, options?: RequestI
 export async function globalAdminFetch(path: string, options?: RequestInit): Promise<Response> {
   const token = await getAdminToken();
   const url = `${baseUrl()}/admin${path}`;
-  return fetch(url, {
+  return fetchWithTimeout(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
