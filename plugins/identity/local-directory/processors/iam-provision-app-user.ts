@@ -65,7 +65,7 @@ export default async function iamProvisionAppUser(job: Bull.Job): Promise<JobRes
             requiredActions: ['UPDATE_PASSWORD'],
           }
         : {}),
-    });
+    }, tenantId);
 
     await prisma.local_directory_users.update({
       where: { id: userId },
@@ -80,7 +80,7 @@ export default async function iamProvisionAppUser(job: Bull.Job): Promise<JobRes
 
     if (!tempPassword) {
       try {
-        await sendKeycloakActionsEmail(realm, keycloakUser.id, ['UPDATE_PASSWORD']);
+        await sendKeycloakActionsEmail(realm, keycloakUser.id, ['UPDATE_PASSWORD'], tenantId);
       } catch (emailErr) {
         logger.warn(
           'Failed to send activation email — user created but needs manual password reset',
