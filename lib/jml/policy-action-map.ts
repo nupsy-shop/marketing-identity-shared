@@ -21,22 +21,38 @@ import type { JobType } from '../jobs/catalog.js';
  * Canonical policy-action strings. Mirror the values the JML setup wizard
  * writes into `agency_settings.jml_policies`. Keeping these as a type makes
  * typos in policy data detectable at the resolution boundary.
+ *
+ * Includes both the internal (legacy) action strings and the persisted
+ * vocabulary written by the canon JML UI.
  */
 export type PolicyAction =
-  // Joiner actions
+  // Joiner actions — internal
   | 'create_account'
   | 'notify_only'
   | 'require_approval'
-  // Leaver / suspension actions
+  // Joiner actions — persisted canon vocabulary
+  | 'auto_provision'
+  | 'hold_review'
+  // Leaver / suspension actions — internal
   | 'revoke_immediately'
   | 'revoke_with_grace'
   | 'disable_account'
   | 'enable_account'
-  // Mover actions — triggered when a user's group memberships or profile
-  // attributes change.
+  // Leaver actions — persisted canon vocabulary
+  | 'immediate_revocation'
+  | 'grace_period'
+  | 'manual_review'
+  // Suspension actions — persisted canon vocabulary
+  | 'immediate_suspension'
+  | 'readonly_downgrade'
+  // Mover actions — internal
   | 'grant_access'
   | 'revoke_access'
-  | 'use_rbac_mappings';
+  | 'use_rbac_mappings'
+  // Mover actions — persisted canon vocabulary
+  | 'auto_revoke'
+  | 'notify_manager'
+  | 'open_access_request';
 
 /**
  * Result of resolving a (lifecycle kind, policy action, plugin) triple to a
@@ -60,6 +76,7 @@ export function resolveJoinerAction(
 ): ResolvedAction | null {
   switch (action) {
     case 'create_account':
+    case 'auto_provision':
       // Primary: provision the identity into Keycloak. Per-plugin fan-out
       // (e.g. gws_create_user) is handled by iam_provision_identity itself
       // through the provisioning hooks, keeping the map plugin-agnostic.
@@ -70,6 +87,9 @@ export function resolveJoinerAction(
       return { jobType: 'email_send', extra: { template: 'jml.joiner' } };
     case 'require_approval':
       // Approval workflows run in-process; no per-user job to enqueue.
+      return null;
+    case 'hold_review':
+      // Deferred: persisted but not yet enforced. No job enqueued.
       return null;
     default:
       return null;
@@ -87,13 +107,18 @@ export function resolveLeaverAction(
 ): ResolvedAction | null {
   switch (action) {
     case 'revoke_immediately':
+    case 'immediate_revocation':
       return { jobType: 'iam_deprovision_app_user' };
     case 'revoke_with_grace':
+    case 'grace_period':
       // Scheduled-action machinery handles the grace window; no immediate
       // per-user job beyond an audit notification.
       return { jobType: 'email_send', extra: { template: 'jml.leaver.scheduled' } };
     case 'notify_only':
       return { jobType: 'email_send', extra: { template: 'jml.leaver' } };
+    case 'manual_review':
+      // Deferred: persisted but not yet enforced. No job enqueued.
+      return null;
     default:
       return null;
   }
@@ -108,7 +133,23 @@ export function resolveSuspensionAction(
   pluginKey: string,
   direction: 'suspend' | 'unsuspend',
 ): ResolvedAction | null {
-  if (action !== 'disable_account' && action !== 'enable_account') {
+  // Deferred actions: persist but don't execute.
+  if (action === 'readonly_downgrade') return null;
+
+  // Persisted canon vocabulary: grace_period and immediate_suspension map to
+  // the generic IAM-level disable/enable. Plugin-specific jobs (gws_suspend_user,
+  // entra_suspend_user) are reserved for the explicit disable_account/enable_account
+  // actions that come from the setup wizard.
+  if (action === 'grace_period' || action === 'immediate_suspension') {
+    if (direction === 'suspend') return { jobType: 'iam_disable_app_user' };
+    return { jobType: 'iam_enable_app_user' };
+  }
+
+  // Internal plugin-specific actions
+  const isPluginSpecificDisable = action === 'disable_account';
+  const isPluginSpecificEnable  = action === 'enable_account';
+
+  if (!isPluginSpecificDisable && !isPluginSpecificEnable) {
     // Any other action string (or undefined) falls back to the IAM-level
     // disable/enable which is plugin-agnostic.
     if (direction === 'suspend') return { jobType: 'iam_disable_app_user' };
@@ -153,6 +194,8 @@ export function resolveMoverGroupAction(
   switch (action) {
     case 'grant_access':
     case 'use_rbac_mappings':
+    case 'auto_provision':
+      // Persisted canon: 'auto_provision' on group_addition → provision path
       if (direction !== 'added') return null;
       if (pluginKey === 'entra-id') return { jobType: 'entra_add_group_member' };
       // GWS / others: use the generic IAM path (provisioning hooks then
@@ -160,15 +203,24 @@ export function resolveMoverGroupAction(
       return { jobType: 'iam_update_identity' };
 
     case 'revoke_access':
+    case 'auto_revoke':
+      // Persisted canon: 'auto_revoke' on group_removal → revoke path
       if (direction !== 'removed') return null;
       if (pluginKey === 'entra-id') return { jobType: 'entra_remove_group_member' };
       return { jobType: 'iam_update_identity' };
 
     case 'notify_only':
+    case 'notify_manager':
+      // Persisted canon: 'notify_manager' on group_removal → notification
       return {
         jobType: 'email_send',
         extra: { template: `jml.mover.group_${direction}` },
       };
+
+    case 'hold_review':
+    case 'open_access_request':
+      // Deferred: persisted but not yet enforced. No job enqueued.
+      return null;
 
     default:
       return null;
