@@ -437,22 +437,28 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
   //    types. Fire-and-forget: must not fail the lifecycle processing path.
   {
     const { publishAuditEvent } = await import('../audit/publisher.js');
-    const auditCtx = { sourceId, pluginKey };
-    const emitDetection = (eventType: string, count: number): void => {
-      if (count === 0) return;
-      publishAuditEvent({
-        eventType,
-        severity: 'info',
-        source: 'jml-lifecycle-processor',
-        actor: { id: null, email: null, type: 'system' },
-        agency: { id: agencyId },
-        context: { ...auditCtx, count },
-      }).catch(() => {});
+    // One audit event PER detected identity so the 7-day counters in
+    // GET /api/agency/jml reflect identity volume (ES doc_count), not the
+    // number of sync runs. Fire-and-forget; never fails the processing path.
+    const emitDetections = (eventType: string, principals: Array<string | null | undefined>): void => {
+      for (const principal of principals) {
+        publishAuditEvent({
+          eventType,
+          severity: 'info',
+          source: 'jml-lifecycle-processor',
+          actor: { id: null, email: null, type: 'system' },
+          agency: { id: agencyId },
+          context: { sourceId, pluginKey, principal: principal ?? null },
+        }).catch(() => {});
+      }
     };
-    emitDetection('jml.joiner.detected',     filteredJoiners.length);
-    emitDetection('jml.leaver.detected',     filteredLeavers.length);
-    emitDetection('jml.suspension.detected', filteredSuspended.length);
-    emitDetection('jml.mover.detected',      moverCount);
+    emitDetections('jml.joiner.detected',     filteredJoiners);
+    emitDetections('jml.leaver.detected',     filteredLeavers);
+    emitDetections('jml.suspension.detected', filteredSuspended);
+    emitDetections('jml.mover.detected', [
+      ...filteredGroupChanges.map(c => c.userEmail || c.userExternalId || c.userId),
+      ...attributeChanges.map(c => c.userEmail || c.userExternalId),
+    ]);
   }
 
   logger.info('[JML] Lifecycle events dispatched', {
