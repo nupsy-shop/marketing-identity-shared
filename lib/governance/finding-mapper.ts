@@ -10,8 +10,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Recommendation } from './recommendations.js';
-import type { UserRisk } from './risk-scorer.js';
+import type { Recommendation, UserRisk } from './recommendations.js';
 
 export interface FindingInput {
   fingerprint: string;
