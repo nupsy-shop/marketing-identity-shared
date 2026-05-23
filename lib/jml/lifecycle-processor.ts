@@ -430,6 +430,31 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
     });
   }
 
+  // 5. Emit detection audit events to Elasticsearch (audit-as-source-of-truth).
+  //    These are distinct from the notification events above, which go through
+  //    dispatchNotification (notification channels only, never ES).
+  //    The 7-day card counters in GET /api/agency/jml read these exact event
+  //    types. Fire-and-forget: must not fail the lifecycle processing path.
+  {
+    const { publishAuditEvent } = await import('../audit/publisher.js');
+    const auditCtx = { sourceId, pluginKey };
+    const emitDetection = (eventType: string, count: number): void => {
+      if (count === 0) return;
+      publishAuditEvent({
+        eventType,
+        severity: 'info',
+        source: 'jml-lifecycle-processor',
+        actor: { id: null, email: null, type: 'system' },
+        agency: { id: agencyId },
+        context: { ...auditCtx, count },
+      }).catch(() => {});
+    };
+    emitDetection('jml.joiner.detected',     filteredJoiners.length);
+    emitDetection('jml.leaver.detected',     filteredLeavers.length);
+    emitDetection('jml.suspension.detected', filteredSuspended.length);
+    emitDetection('jml.mover.detected',      moverCount);
+  }
+
   logger.info('[JML] Lifecycle events dispatched', {
     agencyId, sourceId, pluginKey,
     processed, skippedByScope, enqueued,

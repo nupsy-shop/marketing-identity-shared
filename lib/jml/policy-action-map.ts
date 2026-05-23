@@ -140,6 +140,13 @@ export function resolveSuspensionAction(
   // the generic IAM-level disable/enable. Plugin-specific jobs (gws_suspend_user,
   // entra_suspend_user) are reserved for the explicit disable_account/enable_account
   // actions that come from the setup wizard.
+  //
+  // NOTE (follow-up): grace_period resolves to an *immediate* iam_disable_app_user
+  // at this resolver level. The actual grace window (delay before enforcement)
+  // is separately managed by lib/jml/scheduled-actions.ts (Heroku Scheduler),
+  // which creates a jml_scheduled_actions row and executes the revocation only
+  // after the configured grace_period_days have elapsed. The two concerns are
+  // intentionally decoupled.
   if (action === 'grace_period' || action === 'immediate_suspension') {
     if (direction === 'suspend') return { jobType: 'iam_disable_app_user' };
     return { jobType: 'iam_enable_app_user' };
