@@ -47,6 +47,17 @@ export function fingerprintFor(
     .slice(0, 32);
 }
 
+// Human-readable suggested action per recommendation type. The engine's
+// `action` field is a machine API descriptor ({method, path, body}), not a
+// sentence, so the UI's "recommended action" is derived from `type` here.
+const ACTION_LABELS: Record<string, string> = {
+  revoke_stale: 'Revoke stale access',
+  reduce_scope: 'Reduce permission scope to least privilege',
+  verify_access: 'Verify this access is still required',
+  resolve_drift: 'Re-align grant to the expected policy',
+  add_expiration: 'Wrap in a time-bound (expiring) grant',
+};
+
 const PLATFORM_LABELS: Record<string, string> = {
   hubspot: 'HubSpot',
   meta: 'Meta',
@@ -72,7 +83,7 @@ export function recommendationToFindingInput(
     severity: rec.severity,
     title: rec.description,
     description: rec.evidence[0] ?? rec.description,
-    recommendation: typeof rec.action === 'object' ? rec.description : String(rec.action),
+    recommendation: ACTION_LABELS[rec.type] ?? 'Review and remediate',
     principalType: 'user',
     principalId: rec.targetUserId,
     principalLabel: user.name || user.email,
