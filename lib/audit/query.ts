@@ -35,6 +35,11 @@ export interface AuditQueryOptions {
   actor_id?: string | null;
   actorEmail?: string | null;
   actorId?: string | null;
+  /**
+   * Actor kind filter: 'human' maps to ES actor.type='user';
+   * 'system' maps to actor.type='system'.
+   */
+  actorType?: 'human' | 'system' | string | null;
   target_id?: string | null;
   resourceType?: string | null;
   resourceId?: string | null;
@@ -102,6 +107,11 @@ function buildQuery(filters: AuditQueryOptions): EsQuery {
   if (filters.severity) must.push({ term: { severity: filters.severity } });
   if (filters.actorEmail) must.push({ term: { 'actor.email': filters.actorEmail } });
   if (filters.actorId || filters.actor_id) must.push({ term: { 'actor.id': filters.actorId || filters.actor_id } });
+  if (filters.actorType) {
+    // Map 'human' → 'user', 'system' → 'system' (pass-through)
+    const esActorType = filters.actorType === 'human' ? 'user' : filters.actorType;
+    must.push({ term: { 'actor.type': esActorType } });
+  }
   if (filters.resourceType) must.push({ term: { 'resource.type': filters.resourceType } });
   if (filters.resourceId) must.push({ term: { 'resource.id': filters.resourceId } });
   if (filters.clientId) must.push({ term: { 'client.id': filters.clientId } });
@@ -284,4 +294,219 @@ export async function getEventCountsByType(
 
 export async function exportAuditEvents(filters: AuditQueryOptions): Promise<AuditQueryResult> {
   return queryAuditEvents({ ...filters, limit: 10000 });
+}
+
+// ─── Time-Series / Histogram ──────────────────────────────────────────────────
+
+export interface TimeSeriesOptions {
+  /** ISO string or Date — start of the window */
+  from: string | Date;
+  /** ISO string or Date — end of the window */
+  to: string | Date;
+  /** ES fixed_interval string, e.g. '1h', '1d' */
+  interval: string;
+  /**
+   * Expected number of buckets (used for padding/truncation).
+   * Buckets that fall inside [from, to) are returned; missing ones are padded
+   * with 0. The result is truncated to `expectedBuckets` if ES returns more.
+   */
+  expectedBuckets: number;
+  /** Optional additional must-clauses applied to this histogram only */
+  extraMust?: Record<string, unknown>[];
+}
+
+export interface TimeSeriesResult {
+  /** doc_count per bucket, ordered oldest→newest, exactly `expectedBuckets` long */
+  counts: number[];
+  /** Total events across the whole window */
+  total: number;
+}
+
+/**
+ * Run a date-histogram aggregation over the audit index for a single agency.
+ * Returns exactly `options.expectedBuckets` counts (padded with 0 / truncated).
+ *
+ * Sources sparkline: for per-bucket *distinct* sources we use a nested
+ * cardinality sub-agg. Note that ES cardinality on keyword fields in a
+ * date_histogram sub-aggregation is approximate (HyperLogLog) but is the
+ * most cost-effective approach without a script — acceptable for sparkline data.
+ */
+export async function getTimeSeries(
+  agencyId: string,
+  options: TimeSeriesOptions,
+): Promise<TimeSeriesResult> {
+  if (!agencyId) return { counts: new Array(options.expectedBuckets).fill(0), total: 0 };
+
+  const fromStr = typeof options.from === 'string' ? options.from : options.from.toISOString();
+  const toStr   = typeof options.to   === 'string' ? options.to   : options.to.toISOString();
+
+  const must: Record<string, unknown>[] = [
+    { term: { 'agency.id': agencyId } },
+    { range: { timestamp: { gte: fromStr, lte: toStr } } },
+    ...(options.extraMust ?? []),
+  ];
+
+  const queryBody: Record<string, unknown> = {
+    query: { bool: { must } },
+    size: 0,
+    aggs: {
+      over_time: {
+        date_histogram: {
+          field: 'timestamp',
+          fixed_interval: options.interval,
+          extended_bounds: { min: fromStr, max: toStr },
+          min_doc_count: 0,
+        },
+      },
+    },
+  };
+
+  const indices = allIndicesPattern();
+
+  try {
+    const result = await search(queryBody, indices);
+    const rawBuckets: Array<{ key_as_string: string; doc_count: number }> =
+      result.aggregations?.over_time?.buckets ?? [];
+
+    // Pad / truncate to exactly expectedBuckets
+    const counts: number[] = rawBuckets.map((b) => b.doc_count);
+    while (counts.length < options.expectedBuckets) counts.push(0);
+    const trimmed = counts.slice(0, options.expectedBuckets);
+
+    const rawTotal = result.hits?.total;
+    const total = typeof rawTotal === 'number' ? rawTotal : rawTotal?.value ?? 0;
+
+    return { counts: trimmed, total };
+  } catch (err: unknown) {
+    const msg = (err as Error).message;
+    if (msg.includes('404') || msg.includes('index_not_found')) {
+      return { counts: new Array(options.expectedBuckets).fill(0), total: 0 };
+    }
+    throw err;
+  }
+}
+
+// ─── Actor-Kind Counts ────────────────────────────────────────────────────────
+
+export interface ActorKindBucket {
+  key: 'human' | 'system';
+  doc_count: number;
+}
+
+/**
+ * Returns counts grouped by actor kind (human / system) for the given window.
+ * Maps ES `actor.type` values: `user` → `human`, everything else → `system`.
+ */
+export async function getActorKindCounts(
+  agencyId: string,
+  dateFrom?: string,
+  dateTo?: string,
+): Promise<ActorKindBucket[]> {
+  if (!agencyId) return [];
+
+  const must: Record<string, unknown>[] = [
+    { term: { 'agency.id': agencyId } },
+    ...(dateFrom || dateTo ? [{
+      range: {
+        timestamp: {
+          ...(dateFrom ? { gte: dateFrom } : {}),
+          ...(dateTo ? { lte: dateTo } : {}),
+        },
+      },
+    }] : []),
+  ];
+
+  const queryBody: Record<string, unknown> = {
+    query: { bool: { must } },
+    size: 0,
+    aggs: {
+      by_actor_type: { terms: { field: 'actor.type', size: 10 } },
+    },
+  };
+
+  const indices = allIndicesPattern();
+
+  try {
+    const result = await search(queryBody, indices);
+    const rawBuckets: Array<{ key: string; doc_count: number }> =
+      result.aggregations?.by_actor_type?.buckets ?? [];
+
+    // Map `user` → `human`, `system` → `system`, merge any unexpected values
+    const merged: Record<string, number> = {};
+    for (const b of rawBuckets) {
+      const kind = b.key === 'user' ? 'human' : 'system';
+      merged[kind] = (merged[kind] ?? 0) + b.doc_count;
+    }
+
+    return (Object.entries(merged) as [string, number][]).map(([key, doc_count]) => ({
+      key: key as 'human' | 'system',
+      doc_count,
+    }));
+  } catch (err: unknown) {
+    const msg = (err as Error).message;
+    if (msg.includes('404') || msg.includes('index_not_found')) return [];
+    throw err;
+  }
+}
+
+// ─── Preset Count Query ───────────────────────────────────────────────────────
+
+export interface PresetCountOptions {
+  severity?: string;
+  /** domain prefix — translated to eventType prefix filter */
+  domain?: string;
+  actorType?: 'human' | 'system';
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+/**
+ * Count events matching the given preset filter combination, agency-scoped.
+ * Used by `/api/audit/stats` to populate `presetCounts`.
+ */
+export async function getPresetCount(
+  agencyId: string,
+  opts: PresetCountOptions,
+): Promise<number> {
+  if (!agencyId) return 0;
+
+  const must: Record<string, unknown>[] = [
+    { term: { 'agency.id': agencyId } },
+  ];
+
+  if (opts.dateFrom || opts.dateTo) {
+    must.push({
+      range: {
+        timestamp: {
+          ...(opts.dateFrom ? { gte: opts.dateFrom } : {}),
+          ...(opts.dateTo ? { lte: opts.dateTo } : {}),
+        },
+      },
+    });
+  }
+
+  if (opts.severity) must.push({ term: { severity: opts.severity } });
+  if (opts.domain) must.push({ prefix: { eventType: `${opts.domain}.` } });
+  if (opts.actorType) {
+    const esValue = opts.actorType === 'human' ? 'user' : 'system';
+    must.push({ term: { 'actor.type': esValue } });
+  }
+
+  const queryBody: Record<string, unknown> = {
+    query: { bool: { must } },
+    size: 0,
+    track_total_hits: true,
+  };
+
+  const indices = allIndicesPattern();
+
+  try {
+    const result = await search(queryBody, indices);
+    const rawTotal = result.hits?.total;
+    return typeof rawTotal === 'number' ? rawTotal : rawTotal?.value ?? 0;
+  } catch (err: unknown) {
+    const msg = (err as Error).message;
+    if (msg.includes('404') || msg.includes('index_not_found')) return 0;
+    throw err;
+  }
 }
