@@ -16,27 +16,47 @@
  */
 
 import type { JobType } from '../jobs/catalog.js';
+import { logger } from '../logger.js';
 
 /**
  * Canonical policy-action strings. Mirror the values the JML setup wizard
  * writes into `agency_settings.jml_policies`. Keeping these as a type makes
  * typos in policy data detectable at the resolution boundary.
+ *
+ * Includes both the LEGACY internal vocabulary and the NEW persisted vocabulary
+ * that the app writes into agency_settings.jml_policies.
  */
 export type PolicyAction =
-  // Joiner actions
+  // Joiner actions — legacy
   | 'create_account'
   | 'notify_only'
   | 'require_approval'
-  // Leaver / suspension actions
+  // Joiner actions — persisted vocabulary
+  | 'auto_provision'
+  | 'hold_review'
+  | 'disabled'
+  // Leaver / suspension actions — legacy
   | 'revoke_immediately'
   | 'revoke_with_grace'
   | 'disable_account'
   | 'enable_account'
+  // Leaver actions — persisted vocabulary
+  | 'immediate_revocation'
+  | 'grace_period'
+  | 'manual_review'
+  // Suspension actions — persisted vocabulary
+  | 'readonly_downgrade'
+  | 'immediate_suspension'
   // Mover actions — triggered when a user's group memberships or profile
   // attributes change.
   | 'grant_access'
   | 'revoke_access'
-  | 'use_rbac_mappings';
+  | 'use_rbac_mappings'
+  // Mover actions — persisted vocabulary
+  | 'auto_revoke'
+  | 'notify_manager'
+  | 'open_access_request'
+  | 'do_nothing';
 
 /**
  * Result of resolving a (lifecycle kind, policy action, plugin) triple to a
@@ -55,11 +75,12 @@ export interface ResolvedAction {
  * Keycloak (iam_provision_identity).
  */
 export function resolveJoinerAction(
-  action: PolicyAction | undefined,
+  action: string | undefined,
   pluginKey: string,
 ): ResolvedAction | null {
   switch (action) {
     case 'create_account':
+    case 'auto_provision':
       // Primary: provision the identity into Keycloak. Per-plugin fan-out
       // (e.g. gws_create_user) is handled by iam_provision_identity itself
       // through the provisioning hooks, keeping the map plugin-agnostic.
@@ -71,7 +92,14 @@ export function resolveJoinerAction(
     case 'require_approval':
       // Approval workflows run in-process; no per-user job to enqueue.
       return null;
+    case 'hold_review':
+    case 'disabled':
+      // Deferred — no immediate job; handled by review/approval machinery.
+      return null;
+    case undefined:
+      return null;
     default:
+      logger.warn('[policy-action-map] unmapped joiner action', { action });
       return null;
   }
 }
@@ -82,19 +110,27 @@ export function resolveJoinerAction(
  * Keycloak.
  */
 export function resolveLeaverAction(
-  action: PolicyAction | undefined,
+  action: string | undefined,
   pluginKey: string,
 ): ResolvedAction | null {
   switch (action) {
     case 'revoke_immediately':
+    case 'immediate_revocation':
       return { jobType: 'iam_deprovision_app_user' };
     case 'revoke_with_grace':
+    case 'grace_period':
       // Scheduled-action machinery handles the grace window; no immediate
       // per-user job beyond an audit notification.
       return { jobType: 'email_send', extra: { template: 'jml.leaver.scheduled' } };
     case 'notify_only':
       return { jobType: 'email_send', extra: { template: 'jml.leaver' } };
+    case 'manual_review':
+      // Deferred — no immediate job; handled by review machinery.
+      return null;
+    case undefined:
+      return null;
     default:
+      logger.warn('[policy-action-map] unmapped leaver action', { action });
       return null;
   }
 }
@@ -104,34 +140,53 @@ export function resolveLeaverAction(
  * differs per IdP (gws_suspend_user vs entra_suspend_user).
  */
 export function resolveSuspensionAction(
-  action: PolicyAction | undefined,
+  action: string | undefined,
   pluginKey: string,
   direction: 'suspend' | 'unsuspend',
 ): ResolvedAction | null {
-  if (action !== 'disable_account' && action !== 'enable_account') {
-    // Any other action string (or undefined) falls back to the IAM-level
-    // disable/enable which is plugin-agnostic.
-    if (direction === 'suspend') return { jobType: 'iam_disable_app_user' };
-    return { jobType: 'iam_enable_app_user' };
+  // readonly_downgrade: deferred — no suspension job at all.
+  if (action === 'readonly_downgrade') {
+    return null;
   }
 
-  if (pluginKey === 'google-workspace') {
+  // Plugin-specific path for explicit disable/enable and immediate_suspension actions.
+  if (
+    action === 'disable_account' ||
+    action === 'enable_account' ||
+    action === 'immediate_suspension'
+  ) {
+    if (pluginKey === 'google-workspace') {
+      return direction === 'suspend'
+        ? { jobType: 'gws_suspend_user' }
+        // GWS has no dedicated unsuspend job yet; fall back to IAM enable.
+        : { jobType: 'iam_enable_app_user' };
+    }
+
+    if (pluginKey === 'entra-id') {
+      return direction === 'suspend'
+        ? { jobType: 'entra_suspend_user' }
+        : { jobType: 'entra_unsuspend_user' };
+    }
+
+    // Unknown plugin — use the generic IAM path.
     return direction === 'suspend'
-      ? { jobType: 'gws_suspend_user' }
-      // GWS has no dedicated unsuspend job yet; fall back to IAM enable.
+      ? { jobType: 'iam_disable_app_user' }
       : { jobType: 'iam_enable_app_user' };
   }
 
-  if (pluginKey === 'entra-id') {
-    return direction === 'suspend'
-      ? { jobType: 'entra_suspend_user' }
-      : { jobType: 'entra_unsuspend_user' };
+  // All other values (grace_period, notify_only, immediate_revocation, undefined, unknown)
+  // fall through to the generic IAM path.
+  if (action !== undefined) {
+    // Only warn for non-empty strings that aren't explicitly handled above;
+    // undefined is a legitimately unset policy.
+    const knownNullActions = ['grace_period', 'notify_only', 'immediate_revocation', 'manual_review'];
+    if (!knownNullActions.includes(action)) {
+      logger.warn('[policy-action-map] unmapped suspension action; using generic IAM fallback', { action });
+    }
   }
 
-  // Unknown plugin — use the generic IAM path.
-  return direction === 'suspend'
-    ? { jobType: 'iam_disable_app_user' }
-    : { jobType: 'iam_enable_app_user' };
+  if (direction === 'suspend') return { jobType: 'iam_disable_app_user' };
+  return { jobType: 'iam_enable_app_user' };
 }
 
 /**
@@ -146,13 +201,14 @@ export function resolveSuspensionAction(
  * mover events fall back to the generic IAM paths.
  */
 export function resolveMoverGroupAction(
-  action: PolicyAction | undefined,
+  action: string | undefined,
   pluginKey: string,
   direction: 'added' | 'removed',
 ): ResolvedAction | null {
   switch (action) {
     case 'grant_access':
     case 'use_rbac_mappings':
+    case 'auto_provision':
       if (direction !== 'added') return null;
       if (pluginKey === 'entra-id') return { jobType: 'entra_add_group_member' };
       // GWS / others: use the generic IAM path (provisioning hooks then
@@ -160,17 +216,30 @@ export function resolveMoverGroupAction(
       return { jobType: 'iam_update_identity' };
 
     case 'revoke_access':
+    case 'auto_revoke':
       if (direction !== 'removed') return null;
       if (pluginKey === 'entra-id') return { jobType: 'entra_remove_group_member' };
       return { jobType: 'iam_update_identity' };
 
     case 'notify_only':
+    case 'notify_manager':
       return {
         jobType: 'email_send',
         extra: { template: `jml.mover.group_${direction}` },
       };
 
+    case 'hold_review':
+    case 'open_access_request':
+    case 'do_nothing':
+    case 'grace_period':
+      // Deferred — handled by review/approval/scheduled-actions machinery.
+      return null;
+
+    case undefined:
+      return null;
+
     default:
+      logger.warn('[policy-action-map] unmapped mover group action', { action });
       return null;
   }
 }
