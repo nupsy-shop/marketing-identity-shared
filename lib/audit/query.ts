@@ -365,13 +365,15 @@ export async function getTimeSeries(
 
   try {
     const result = await search(queryBody, indices);
-    const rawBuckets: Array<{ key_as_string: string; doc_count: number }> =
-      result.aggregations?.over_time?.buckets ?? [];
+    const rawBuckets = (result.aggregations?.over_time?.buckets ?? []) as unknown as Array<{ key_as_string: string; doc_count: number }>;
 
-    // Pad / truncate to exactly expectedBuckets
+    // Pad / truncate to exactly expectedBuckets.
+    // When from/to aren't hour-aligned ES may emit expectedBuckets+1 buckets.
+    // Keep the NEWEST expectedBuckets (slice from the end) so the current
+    // (most relevant) hour is always included.
     const counts: number[] = rawBuckets.map((b) => b.doc_count);
     while (counts.length < options.expectedBuckets) counts.push(0);
-    const trimmed = counts.slice(0, options.expectedBuckets);
+    const trimmed = counts.slice(-options.expectedBuckets);
 
     const rawTotal = result.hits?.total;
     const total = typeof rawTotal === 'number' ? rawTotal : rawTotal?.value ?? 0;
@@ -431,7 +433,9 @@ export async function getActorKindCounts(
     const rawBuckets: Array<{ key: string; doc_count: number }> =
       result.aggregations?.by_actor_type?.buckets ?? [];
 
-    // Map `user` → `human`, `system` → `system`, merge any unexpected values
+    // Map `user` → `human`, `system` → `system`, merge any unexpected values.
+    // Any actor.type that is not 'user' is bucketed as 'system' — this holds for
+    // all current values ('user' and 'system') and degrades gracefully for future ones.
     const merged: Record<string, number> = {};
     for (const b of rawBuckets) {
       const kind = b.key === 'user' ? 'human' : 'system';
