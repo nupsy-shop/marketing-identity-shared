@@ -518,7 +518,7 @@ export async function detectPrincipalDrift(
     if (!gate.allow) {
       skipped[gate.reason] = (skipped[gate.reason] ?? 0) + 1;
       await publishAuditEvent({
-        type: 'remediation',
+        eventType: 'remediation.skipped',
         action: 'skipped',
         actor: { id: 'system' },
         agency_id: agencyId,

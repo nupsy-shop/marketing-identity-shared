@@ -87,7 +87,7 @@ export async function evaluateAndRemediate(
   const policy = policies[triggerType] as RemediationPolicy | undefined;
 
   publishAuditEvent({
-    type: 'remediation',
+    eventType: 'remediation.evaluated',
     action: 'evaluated',
     actor: { id: 'system' },
     agency_id: agencyId,
@@ -96,7 +96,7 @@ export async function evaluateAndRemediate(
 
   if (!policy || policy.mode === 'manual') {
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.manual_recommended',
       action: 'manual_recommended',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -139,7 +139,7 @@ export async function evaluateAndRemediate(
     // on a `circuit_breaker_open` result will now receive `null` instead of
     // a UUID. Callers must not assume a row exists when action='circuit_breaker_open'.
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.circuit_breaker_open',
       action: 'circuit_breaker_open',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -166,7 +166,7 @@ export async function evaluateAndRemediate(
   if (isDryRun(policy)) {
     await updateRemediationStatus(remediation.id, 'dry_run');
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.dry_run',
       action: 'dry_run',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -186,7 +186,7 @@ export async function evaluateAndRemediate(
         data: { status: 'scheduled', scheduled_at: scheduledAt, updated_at: new Date() },
       });
       publishAuditEvent({
-        type: 'remediation',
+        eventType: 'remediation.scheduled',
         action: 'scheduled',
         actor: { id: 'system' },
         agency_id: agencyId,
@@ -233,7 +233,7 @@ async function enforceFeatureGate(
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.entitlement_unavailable',
       action: 'entitlement_unavailable',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -253,7 +253,7 @@ async function enforceFeatureGate(
   // any createRemediationRecord call so no row is persisted.
   if (entitlements.source === 'fallback') {
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.entitlement_unavailable',
       action: 'entitlement_unavailable',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -309,7 +309,7 @@ async function evaluateDriftDetected(
       // Operator has explicitly bypassed the gate. Emit a traceability audit
       // event and continue to dispatch (rate-limit + circuit-breaker still apply).
       publishAuditEvent({
-        type: 'remediation',
+        eventType: 'remediation.gate_bypassed',
         action: 'gate_bypassed',
         actor: { id: (context._bypassedBy as string | undefined) ?? 'operator' },
         agency_id: agencyId,
@@ -323,7 +323,7 @@ async function evaluateDriftDetected(
       }).catch(() => {});
     } else {
       publishAuditEvent({
-        type: 'remediation',
+        eventType: 'remediation.skipped',
         action: 'skipped',
         actor: { id: 'system' },
         agency_id: agencyId,
@@ -359,7 +359,7 @@ async function evaluateDriftDetected(
 
   if (isDryRun(policy)) {
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.dry_run',
       action: 'dry_run',
       actor: { id: 'system' },
       agency_id: agencyId,

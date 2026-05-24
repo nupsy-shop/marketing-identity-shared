@@ -32,7 +32,7 @@ const DEFAULT_TEMPLATE_KEY: Record<RemediationMode, string | null> = {
 
 function publishCircuitBreakerTripped(agencyId: string): void {
   publishAuditEvent({
-    type: 'remediation',
+    eventType: 'remediation.rate_limited',
     action: 'rate_limited',
     actor: { id: 'system' },
     agency_id: agencyId,
@@ -148,7 +148,7 @@ export async function dispatchWorkflow(
     });
 
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.dispatched',
       action: 'dispatched',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -165,7 +165,7 @@ export async function dispatchWorkflow(
     // for a fully_automatic remediation (#803 spec gap 2).
     if (isFullyAutoCompleted) {
       publishAuditEvent({
-        type: 'remediation',
+        eventType: 'remediation.auto_executed',
         action: 'auto_executed',
         actor: { id: 'system' },
         agency_id: agencyId,
