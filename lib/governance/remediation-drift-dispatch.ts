@@ -22,7 +22,7 @@ import type { RemediationContext, RemediationResult } from './remediation-types.
 
 function publishCircuitBreakerTripped(agencyId: string): void {
   publishAuditEvent({
-    type: 'remediation',
+    eventType: 'remediation.rate_limited',
     action: 'rate_limited',
     actor: { id: 'system' },
     agency_id: agencyId,
@@ -52,7 +52,7 @@ export async function dispatchDriftWorkflow(
     if (!definition) {
       await recordFailure(agencyId, () => publishCircuitBreakerTripped(agencyId));
       publishAuditEvent({
-        type: 'remediation',
+        eventType: 'remediation.failed',
         action: 'failed',
         actor: { id: 'system' },
         agency_id: agencyId,
@@ -74,7 +74,7 @@ export async function dispatchDriftWorkflow(
     );
 
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.dispatched',
       action: 'dispatched',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -100,7 +100,7 @@ export async function dispatchDriftWorkflow(
     );
     await recordFailure(agencyId, () => publishCircuitBreakerTripped(agencyId));
     publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.failed',
       action: 'failed',
       actor: { id: 'system' },
       agency_id: agencyId,

@@ -92,7 +92,7 @@ export async function cancelRemediation(
   }
 
   publishAuditEvent({
-    type: 'remediation',
+    eventType: 'remediation.cancelled',
     action: 'cancelled',
     actor: { id: actorId },
     agency_id: remediation.agency_id,

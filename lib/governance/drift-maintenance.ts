@@ -83,7 +83,7 @@ export async function runDriftMaintenanceForAgency(
   const { logger } = getRuntime();
 
   await publishAuditEvent({
-    type: 'remediation',
+    eventType: 'remediation.drift_maintenance_started',
     action: 'drift_maintenance_started',
     actor: { id: 'system' },
     agency_id: agencyId,
@@ -95,7 +95,7 @@ export async function runDriftMaintenanceForAgency(
 
   if (!policy) {
     await publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.drift_maintenance_skipped',
       action: 'drift_maintenance_skipped',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -137,7 +137,7 @@ export async function runDriftMaintenanceForAgency(
     }
 
     await publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.drift_maintenance_completed',
       action: 'drift_maintenance_completed',
       actor: { id: 'system' },
       agency_id: agencyId,
@@ -159,7 +159,7 @@ export async function runDriftMaintenanceForAgency(
     const message = err instanceof Error ? err.message : String(err);
     logger.error('[DriftMaintenance] tick failed', { agencyId, message });
     await publishAuditEvent({
-      type: 'remediation',
+      eventType: 'remediation.drift_maintenance_failed',
       action: 'drift_maintenance_failed',
       actor: { id: 'system' },
       agency_id: agencyId,

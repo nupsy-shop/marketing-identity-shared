@@ -110,7 +110,7 @@ export async function persistSuppressedFinding(args: {
     },
   });
   publishAuditEvent({
-    type: 'remediation',
+    eventType: 'remediation.rate_limited',
     action: 'rate_limited',
     actor: { id: 'system' },
     agency_id: args.agencyId,
