@@ -80,10 +80,17 @@ export async function dispatchWorkflow(
   }
 
   try {
+    // Resolve the active workflow definition for this agency. System
+    // templates are not stored as null-agency rows — `workflow_definitions.
+    // agency_id` is NOT NULL and each template is copied into a per-agency
+    // row (`is_system = true`) at install time. The previous
+    // `agency_id: { in: [agencyId, null] }` form was both dead (no null rows
+    // can exist) and invalid: Prisma rejects a null element inside an `in`
+    // array for a scalar field, throwing on every dispatch.
     const defResult = await getRuntime().prisma.workflow_definitions.findFirst({
       where: {
         key: templateKey,
-        agency_id: { in: [agencyId, null as unknown as string] },
+        agency_id: agencyId,
         is_active: true,
       },
       select: { id: true },
