@@ -88,6 +88,10 @@ export const JOB_CATALOG = {
   // (the same governance chain the workflow engine uses). B-gate is
   // honoured; gated tenants are skipped + audit-logged. Idempotent.
   maintain_drift_remediations: { queue: QUEUE_NAMES.AUTOMATION },
+  // Permission analysis scan — per-agency governance scan. Reuses the risk
+  // engine, upserts permission_findings, writes a permission_scans row.
+  // Phase 1: enqueued manually by POST /api/agency/permission-analysis/scan.
+  run_permission_scan_for_agency: { queue: QUEUE_NAMES.AUTOMATION },
   enforce_retention:          { queue: QUEUE_NAMES.AUTOMATION },
   discover_assets:            { queue: QUEUE_NAMES.AUTOMATION },
   jml_detect_lifecycle:       { queue: QUEUE_NAMES.AUTOMATION },
