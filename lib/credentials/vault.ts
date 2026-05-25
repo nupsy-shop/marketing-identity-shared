@@ -129,6 +129,12 @@ export async function rotateCredential(
   const existing = await revealCredential(identityId);
   if (!existing) return null;
 
+  // E2E fault-injection seam: inert unless a seeded credential carries the
+  // magic marker (written only by tests/.../seed-identity-credential.ts --fault).
+  if ((existing as Record<string, unknown>).__e2e_fault === 'vault_write_failed') {
+    throw new Error('e2e vault fault injection: vault_write_failed');
+  }
+
   const newPassword = generatePassword();
   const rotatedAt = new Date().toISOString();
 

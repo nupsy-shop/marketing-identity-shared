@@ -29,6 +29,7 @@
  */
 import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
+import { recordTestDispatch } from '../../../../lib/notifications/dispatch-capture.js';
 import { formatEventMessage } from '../../common/event-messages.js';
 import {
   buildBlockKitPayload,
@@ -94,7 +95,7 @@ export default async function slackNotify(job: Bull.Job): Promise<JobResult> {
     };
   }
 
-  const config = ((channel.config ?? {}) as SlackChannelConfig);
+  const config = ((channel.config ?? {}) as SlackChannelConfig & { __e2e_force_status?: number });
   if (!config.webhookUrl) {
     logger.warn('slack_notify: channel has no webhookUrl configured', {
       jobId: String(job.id), tenantId, channelId,
@@ -103,6 +104,33 @@ export default async function slackNotify(job: Bull.Job): Promise<JobResult> {
       status: 'skipped',
       jobType: 'slack_notify',
       reason: 'channel.config.webhookUrl is not set',
+    };
+  }
+
+  // E2E forced-failure seam. When a test seed stamps `__e2e_force_status` on
+  // the channel config, skip the real network call entirely and treat the
+  // given HTTP status as the outcome. This marker is only ever set by test
+  // seeds; it is never present in production channel configs.
+  // We gate purely on the marker's presence — no extra DB query — because
+  // `recordTestDispatch` already performs the `is_test_tenant` check and is
+  // inert for real tenants. The forced path returns (never throws) so Bull
+  // does NOT queue a retry.
+  if (config.__e2e_force_status !== undefined) {
+    const httpStatus = config.__e2e_force_status;
+    const ok = httpStatus >= 200 && httpStatus < 300;
+    await recordTestDispatch({
+      agencyId: tenantId,
+      eventType,
+      channelId,
+      channelType: 'slack',
+      status: ok ? 'delivered' : 'failed',
+      detail: { httpStatus, forced: true },
+    }).catch(() => {});
+    return {
+      status: ok ? 'completed' : 'failed',
+      jobType: 'slack_notify',
+      reason: ok ? undefined : `forced failure (status=${httpStatus})`,
+      deliveryStatus: httpStatus,
     };
   }
 
@@ -129,6 +157,18 @@ export default async function slackNotify(job: Bull.Job): Promise<JobResult> {
 
   // 4. POST (or short-circuit via the E2E override hook).
   const result = await postSlack(tenantId, config.webhookUrl, payload);
+
+  // 5. Record the delivery outcome for test-tenant capture. Inert for real
+  // tenants (recordTestDispatch gates on is_test_tenant internally).
+  // Swallow errors so a capture failure never disrupts real delivery.
+  await recordTestDispatch({
+    agencyId: tenantId,
+    eventType,
+    channelId,
+    channelType: 'slack',
+    status: result.ok ? 'delivered' : 'failed',
+    detail: { httpStatus: result.status },
+  }).catch(() => {});
 
   if (result.ok) {
     logger.info('slack_notify: delivered', {
