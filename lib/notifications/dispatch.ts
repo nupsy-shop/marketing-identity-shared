@@ -18,6 +18,7 @@
  */
 
 import { getRuntime } from '../runtime.js';
+import { recordTestDispatch } from './dispatch-capture.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -89,6 +90,9 @@ export async function dispatchNotification(
 
   let dispatched = 0;
   for (const channel of matched) {
+    await recordTestDispatch({
+      agencyId, eventType, channelId: channel.id, channelType: channel.type, status: 'matched',
+    }).catch(() => {});
     try {
       const ok = await routeChannel(channel, agencyId, eventType, context);
       if (ok) dispatched++;
