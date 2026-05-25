@@ -19,6 +19,7 @@
  */
 import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
+import { recordTestDispatch } from '../../../../lib/notifications/dispatch-capture.js';
 import { formatEventMessage } from '../../common/event-messages.js';
 import {
   sendEmailMessage,
@@ -70,12 +71,34 @@ export default async function emailSend(job: Bull.Job): Promise<JobResult> {
     };
   }
 
-  const config = ((channel.config ?? {}) as EmailChannelConfig);
+  const config = ((channel.config ?? {}) as EmailChannelConfig & { __e2e_force_status?: number });
   if (!config.recipients || config.recipients.trim().length === 0) {
     return {
       status: 'skipped',
       jobType: 'email_send',
       reason: 'channel.config.recipients is empty',
+    };
+  }
+
+  // E2E forced-failure seam. See slack_notify for the full rationale. Same
+  // approach: gate on the marker, skip real send, return (never throw) so
+  // Bull does not retry. recordTestDispatch gates on is_test_tenant.
+  if (config.__e2e_force_status !== undefined) {
+    const httpStatus = config.__e2e_force_status;
+    const ok = httpStatus >= 200 && httpStatus < 300;
+    await recordTestDispatch({
+      agencyId: tenantId,
+      eventType,
+      channelId,
+      channelType: 'email',
+      status: ok ? 'delivered' : 'failed',
+      detail: { httpStatus, forced: true },
+    }).catch(() => {});
+    return {
+      status: ok ? 'completed' : 'failed',
+      jobType: 'email_send',
+      reason: ok ? undefined : `forced failure (status=${httpStatus})`,
+      deliveryStatus: httpStatus,
     };
   }
 
@@ -89,6 +112,16 @@ export default async function emailSend(job: Bull.Job): Promise<JobResult> {
     actionUrl: typeof context?.actionUrl === 'string' ? context.actionUrl : undefined,
     metadata: context,
   });
+
+  // Record the delivery outcome for test-tenant capture. Inert for real tenants.
+  await recordTestDispatch({
+    agencyId: tenantId,
+    eventType,
+    channelId,
+    channelType: 'email',
+    status: result.ok ? 'delivered' : 'failed',
+    detail: { httpStatus: result.status },
+  }).catch(() => {});
 
   if (result.ok) {
     logger.info('email_send: delivered', {
