@@ -211,7 +211,22 @@ async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Prom
         await tx.auditEsIndexState.createMany({
           data: rows.map(r => ({ eventId: r.eventId })),
         });
-      }, { isolationLevel: 'Serializable' });
+      }, {
+        isolationLevel: 'Serializable',
+        // Prisma defaults are too tight for the audit chain-write path under
+        // realistic Heroku-PG WAN load: `timeout` defaults to 5_000ms (txn
+        // body wall-clock) and `maxWait` defaults to 2_000ms (connection
+        // acquisition from the Prisma pool). Both surface as P2028 with the
+        // same message ("Unable to start a transaction in the given time"),
+        // and we have observed the chain-write path block on connection
+        // acquisition when other writers (audit-retention sweep, SCIM delta
+        // replay, JML burst) saturate the pool. Bumping both gives us
+        // headroom without changing isolation semantics. The retry loop
+        // around this block still handles legitimate serialization
+        // failures via `isSerializationFailure` / `isPrimaryKeyConflict`.
+        timeout: 30_000,
+        maxWait: 10_000,
+      });
       return; // success
     } catch (err) {
       if ((isPrimaryKeyConflict(err) || isSerializationFailure(err)) && attempt < MAX_PK_RETRIES - 1) {
