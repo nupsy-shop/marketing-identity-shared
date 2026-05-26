@@ -189,8 +189,21 @@ export async function runHealthChecksForAgency(
     now,
     dryRun,
   });
+  // Local directory has no remote endpoint to probe — its health is a pure
+  // function of sync freshness (last_sync_at / last_sync_status). An
+  // undefined-returning liveness routes evaluateHealth through its
+  // sync-signal-only branch (stale → degraded, recent success → connected),
+  // so stale/recovered local sources still surface on the dashboard and emit
+  // state_change events for uptime math.
+  const localDirectory = await runHealthChecksForAgencyByPlugin({
+    agencyId,
+    pluginKey: 'local-directory',
+    livenessFn: async () => undefined,
+    now,
+    dryRun,
+  });
 
-  return [...gws, ...entra];
+  return [...gws, ...entra, ...localDirectory];
 }
 
 // ─── Per-source path (private to this module) ───────────────────────────────
