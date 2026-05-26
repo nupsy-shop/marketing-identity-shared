@@ -418,6 +418,7 @@ export function mapLegacyEventType(legacyEvent: string): string {
     'PAM_SESSION_REVOKED': 'pam.session.revoked',
     'USER_LOGIN': 'auth.login.success',
     'USER_LOGIN_FAILED': 'auth.login.failed',
+    'USER_LOGOUT': 'auth.logout',
     'AGENCY_SIGNUP': 'auth.agency.signup',
     'AGENCY_CREATED': 'admin.agency.created',
     'AGENCY_SWITCHED': 'auth.agency.switched',
