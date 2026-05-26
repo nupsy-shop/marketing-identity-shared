@@ -69,6 +69,16 @@ interface IdentitySourceRow {
  *
  * Pure over Prisma — no event publishing side-effects here. The caller
  * decides whether to forward emissions to the remediation pipeline.
+ *
+ * Implementation note: signal volume scales with the agency's principal
+ * count (one signal per LDU + per HI identity + per synthetic + per
+ * federation-orphan candidate). For trevox (~500 signals) the prior
+ * per-signal `findFirst + update` loop produced ~1000 sequential round
+ * trips and overran the E2E detector budget (~125s on Heroku from a
+ * laptop, scaling linearly with RTT). Batched here into: one `findMany`
+ * for priors, one `updateMany` for steady-state liveness, one
+ * `createMany` for new unhealthy rows, and one parallel `update` per
+ * actual state transition (rare in steady state).
  */
 export async function upsertAndDedupe(
   agencyId: string,
@@ -78,85 +88,137 @@ export async function upsertAndDedupe(
   const now = new Date();
   const emissions: DetectorEmission[] = [];
 
+  if (signals.length === 0) return emissions;
+
+  const tupleKey = (
+    sourcePluginKey: string,
+    principalId: string,
+    driftType: string,
+  ): string => `${sourcePluginKey}${principalId}${driftType}`;
+
+  // Batch-load priors: the schema's unique constraint
+  // (agency_id, source_plugin_key, principal_id, drift_type) guarantees
+  // at most one row per signal tuple.
+  const priors = await prisma.drift_findings.findMany({
+    where: {
+      agency_id: agencyId,
+      OR: signals.map((s) => ({
+        source_plugin_key: s.sourcePluginKey,
+        principal_id: s.principalId,
+        drift_type: s.driftType,
+      })),
+    },
+  });
+
+  type PriorRow = (typeof priors)[number] & { dismissed_at?: Date | null };
+  const priorByKey = new Map<string, PriorRow>();
+  for (const p of priors as PriorRow[]) {
+    priorByKey.set(tupleKey(p.source_plugin_key, p.principal_id, p.drift_type), p);
+  }
+
+  // Bucket each signal into liveness-refresh / state-transition / create-new.
+  // PR 5c — dismissed findings refresh liveness but never emit transitions.
+  const livenessIds: string[] = [];
+  const transitions: Array<{
+    priorId: string;
+    nextState: DriftFindingState;
+    transition: DetectorEmission['transition'];
+    signal: PrincipalSignal;
+  }> = [];
+  const createSignals: PrincipalSignal[] = [];
+
   for (const signal of signals) {
-    const prior = await prisma.drift_findings.findFirst({
-      where: {
-        agency_id: agencyId,
-        source_plugin_key: signal.sourcePluginKey,
-        principal_id: signal.principalId,
-        drift_type: signal.driftType,
-      },
-    });
+    const prior = priorByKey.get(
+      tupleKey(signal.sourcePluginKey, signal.principalId, signal.driftType),
+    );
 
     if (!prior) {
       if (signal.currentState === 'unhealthy') {
-        await prisma.drift_findings.create({
-          data: {
-            agency_id: agencyId,
-            source_plugin_key: signal.sourcePluginKey,
-            principal_type: signal.principalType,
-            principal_id: signal.principalId,
-            drift_type: signal.driftType,
-            state: 'unhealthy',
-            first_detected_at: now,
-            last_seen_at: now,
-            last_transition_at: now,
-            resolved_at: null,
-          },
-        });
-        emissions.push({
-          transition: 'new_unhealthy',
-          sourcePluginKey: signal.sourcePluginKey,
-          principalType: signal.principalType,
-          principalId: signal.principalId,
-          driftType: signal.driftType,
-        });
+        createSignals.push(signal);
       }
       // prior missing + current healthy: nothing to record
       continue;
     }
 
-    // PR 5c — skip dismissed findings: they stay visible with a "Dismissed"
-    // badge but should NOT be re-flagged on future scans.  Update last_seen_at
-    // so the row doesn't look stale but do NOT emit a transition event.
-    const priorRecord = prior as typeof prior & { dismissed_at?: Date | null };
-    if (priorRecord.dismissed_at != null) {
-      await prisma.drift_findings.update({
-        where: { id: prior.id },
-        data: { last_seen_at: now, updated_at: now },
-      });
+    if (prior.dismissed_at != null || prior.state === signal.currentState) {
+      livenessIds.push(prior.id);
       continue;
     }
 
-    if (prior.state === signal.currentState) {
-      // Dedup: same state — refresh liveness only, no emission.
-      await prisma.drift_findings.update({
-        where: { id: prior.id },
-        data: { last_seen_at: now, updated_at: now },
-      });
-      continue;
-    }
+    transitions.push({
+      priorId: prior.id,
+      nextState: signal.currentState,
+      transition: prior.state === 'unhealthy' ? 'resolved' : 'regressed',
+      signal,
+    });
+  }
 
-    // State transition.
-    const transition: DetectorEmission['transition'] =
-      prior.state === 'unhealthy' ? 'resolved' : 'regressed';
-    await prisma.drift_findings.update({
-      where: { id: prior.id },
-      data: {
-        state: signal.currentState,
+  // 1. Bulk liveness refresh — steady-state + dismissed share the same write.
+  if (livenessIds.length > 0) {
+    await prisma.drift_findings.updateMany({
+      where: { id: { in: livenessIds } },
+      data: { last_seen_at: now, updated_at: now },
+    });
+  }
+
+  // 2. Bulk-insert new unhealthy findings (skipDuplicates makes this safe
+  //    under detector races: two concurrent runs may both observe a missing
+  //    prior; whichever loses the unique-constraint race silently no-ops
+  //    instead of throwing, matching the prior loop's at-most-once-per-tuple
+  //    behavior under the same race).
+  if (createSignals.length > 0) {
+    await prisma.drift_findings.createMany({
+      data: createSignals.map((s) => ({
+        agency_id: agencyId,
+        source_plugin_key: s.sourcePluginKey,
+        principal_type: s.principalType,
+        principal_id: s.principalId,
+        drift_type: s.driftType,
+        state: 'unhealthy',
+        first_detected_at: now,
         last_seen_at: now,
         last_transition_at: now,
-        resolved_at: signal.currentState === 'healthy' ? now : null,
-        updated_at: now,
-      },
+        resolved_at: null,
+      })),
+      skipDuplicates: true,
     });
-    emissions.push({
-      transition,
-      sourcePluginKey: signal.sourcePluginKey,
-      principalType: signal.principalType,
-      principalId: signal.principalId,
-      driftType: signal.driftType,
-    });
+    for (const s of createSignals) {
+      emissions.push({
+        transition: 'new_unhealthy',
+        sourcePluginKey: s.sourcePluginKey,
+        principalType: s.principalType,
+        principalId: s.principalId,
+        driftType: s.driftType,
+      });
+    }
+  }
+
+  // 3. Apply state transitions in parallel — these are rare (only on
+  //    healthy↔unhealthy flips), so the fan-out is naturally bounded.
+  if (transitions.length > 0) {
+    await Promise.all(
+      transitions.map((t) =>
+        prisma.drift_findings.update({
+          where: { id: t.priorId },
+          data: {
+            state: t.nextState,
+            last_seen_at: now,
+            last_transition_at: now,
+            resolved_at: t.nextState === 'healthy' ? now : null,
+            updated_at: now,
+          },
+        }),
+      ),
+    );
+    for (const t of transitions) {
+      emissions.push({
+        transition: t.transition,
+        sourcePluginKey: t.signal.sourcePluginKey,
+        principalType: t.signal.principalType,
+        principalId: t.signal.principalId,
+        driftType: t.signal.driftType,
+      });
+    }
   }
 
   return emissions;
