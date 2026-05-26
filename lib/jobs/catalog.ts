@@ -240,6 +240,11 @@ export const JOB_CATALOG = {
   dispatch_end_campaign:          { queue: QUEUE_NAMES.SYSTEM },
   iam_provision_realm:            { queue: QUEUE_NAMES.SYSTEM },
   iam_upsert_realm_idp:           { queue: QUEUE_NAMES.SYSTEM },
+  // Agency offboarding — deletes the per-agency Keycloak realm. The processor
+  // (shared/lib/identity/sso/iam-delete-realm.ts) reads the realm pointer from
+  // server-state (agency_settings.keycloak_realm) and refuses to touch
+  // PROTECTED_REALMS (e.g. agency-trevox, master) under any payload.
+  iam_delete_realm:               { queue: QUEUE_NAMES.SYSTEM },
   // issue #62 — fan-out dispatcher. Routes an onboarding-kit apply
   // to the per-client automation worker.
   dispatch_apply_onboarding_kit:  { queue: QUEUE_NAMES.SYSTEM },

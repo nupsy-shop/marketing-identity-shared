@@ -487,6 +487,39 @@ export async function updateRealmIdentityProvider(realm: string, alias: string, 
   }
 }
 
+/**
+ * Hard-delete an entire Keycloak realm. Irreversible. Callers MUST guard
+ * against deleting protected/shared realms (e.g. `agency-trevox`, `master`) —
+ * this primitive does not enforce those policies, the job processor does.
+ *
+ * Idempotent on 404 (realm already gone).
+ */
+export async function deleteRealm(realm: string, agencyId?: string): Promise<void> {
+  const token = await getAdminToken();
+  const url = `${baseUrl()}/admin/realms/${realm}`;
+  const overrideRes = await maybeOverrideResponse(url, agencyId);
+  if (overrideRes) {
+    if (overrideRes.status === 404) return;
+    if (!overrideRes.ok) {
+      const text = await overrideRes.text();
+      throw new Error(`Failed to delete realm ${realm} (${overrideRes.status}): ${text}`);
+    }
+    return;
+  }
+  const res = await fetchWithTimeout(url, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  });
+  if (res.status === 404) return;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to delete realm ${realm} (${res.status}): ${text}`);
+  }
+}
+
 export async function deleteRealmIdentityProvider(realm: string, alias: string, agencyId?: string): Promise<void> {
   const res = await adminFetch(realm, `/identity-provider/instances/${encodeURIComponent(alias)}`, {
     method: 'DELETE',

@@ -209,7 +209,17 @@ function scrubError(raw: unknown, fallbackCode = 'reconcile_failed'): string {
   return `${fallbackCode}: ${redacted}`;
 }
 
-export default async function iamUpsertRealmIdp(job: { id?: unknown; data: UpsertRealmIdpPayload }): Promise<JobResult> {
+export default async function iamUpsertRealmIdp(
+  job: {
+    id?: unknown;
+    data: UpsertRealmIdpPayload;
+    // Bull passes the full Job object; these fields let the catch path detect
+    // a final-attempt failure (@QaseID=660). Optional so the synchronous test
+    // runner (run-keycloak-job.ts) still works without them.
+    attemptsMade?: number;
+    opts?: { attempts?: number };
+  },
+): Promise<JobResult> {
   const { prisma, logger } = getRuntime();
   const jobId = job.id;
   const { agencyId } = job.data;
@@ -324,15 +334,33 @@ export default async function iamUpsertRealmIdp(job: { id?: unknown; data: Upser
     return { status: 'completed', jobType: 'iam_upsert_realm_idp', outcome: 'synced' };
   } catch (err) {
     const scrubbed = scrubError(err);
+    // @QaseID=660: when Bull is about to drop the job into the failed state
+    // (this attempt was the final one configured by `opts.attempts`), prefix
+    // the persisted error so dashboards and the E2E suite can distinguish
+    // "transient retryable failure" from "exhausted all attempts". Bull's
+    // `attemptsMade` is the count of attempts COMPLETED before this one, so
+    // the final attempt has `attemptsMade + 1 === opts.attempts`.
+    const attemptsMade = job.attemptsMade ?? 0;
+    const maxAttempts = job.opts?.attempts ?? 1;
+    const isFinalAttempt = attemptsMade + 1 >= maxAttempts;
+    const persistedError = isFinalAttempt ? `max_attempts_exceeded: ${scrubbed}` : scrubbed;
     await prisma.agency_settings.update({
       where: { agency_id: agencyId },
       data: {
         sso_config_status: 'error',
-        sso_last_error: scrubbed,
+        sso_last_error: persistedError,
         sso_config_updated_at: new Date(),
       },
     }).catch(() => { /* best-effort status write */ });
-    logger.error('iam_upsert_realm_idp failed', { jobId, agencyId, realm, error: scrubbed });
+    logger.error('iam_upsert_realm_idp failed', {
+      jobId,
+      agencyId,
+      realm,
+      attemptsMade,
+      maxAttempts,
+      isFinalAttempt,
+      error: scrubbed,
+    });
     throw err;
   }
 }

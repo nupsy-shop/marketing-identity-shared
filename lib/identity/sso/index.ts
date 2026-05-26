@@ -7,3 +7,4 @@
  */
 
 export { default as iamUpsertRealmIdp } from './iam-upsert-realm-idp.js';
+export { default as iamDeleteRealm } from './iam-delete-realm.js';
