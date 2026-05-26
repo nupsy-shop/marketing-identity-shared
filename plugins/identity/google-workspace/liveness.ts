@@ -26,6 +26,7 @@
 
 import type { LivenessResult } from '../../../lib/platform-health/types.js';
 import { getRuntime } from '../../../lib/runtime.js';
+import { resolveLivenessOverride } from '../../../lib/platform-health/liveness-override.js';
 
 interface SourceForLiveness {
   id: string;
@@ -38,6 +39,16 @@ interface SourceForLiveness {
 export async function checkGoogleWorkspace(
   source: SourceForLiveness,
 ): Promise<LivenessResult> {
+  // E2E provider-override seam: consult BEFORE any credential check or real
+  // outbound call so test tenants can drive forced 5xx/401 deterministically.
+  // No-op for real agencies (gated by agencies.is_test_tenant).
+  const override = await resolveLivenessOverride(
+    source.agencyId,
+    'gws',
+    'https://admin.googleapis.com/admin/directory/v1/users',
+  );
+  if (override) return override;
+
   const cfg = source.connectionConfig || {};
   const customerId = cfg.customerId as string | undefined;
   const primaryDomain = cfg.primaryDomain as string | undefined;
