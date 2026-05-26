@@ -72,6 +72,56 @@ export interface RuntimeServices {
     url: string,
   ) => Promise<{ status: number; body: unknown; delayMs?: number } | null>;
   /**
+   * Optional provider-auth failure counter (record).
+   *
+   * Called at user-call boundaries — specifically the null-return paths of
+   * `getValidAccessToken` — to mark that a per-request token refresh failed.
+   * The platform-health probe consults the rolling count on its next tick
+   * via {@link getProviderAuthFailureCount} so a sustained pattern of
+   * per-request flaps surfaces as `degraded`, even when the synthetic
+   * probe just succeeded against the same provider.
+   *
+   * Fire-and-forget: never throws, never blocks the caller. Hosts back this
+   * with a Redis INCR + TTL (see lib/platform-health/provider-auth-failure-
+   * counter.ts in the web app and worker repos for the canonical impl).
+   *
+   * Scope: keyed by (agencyId, pluginKey). The shared contract intentionally
+   * keeps `pluginKey` as a plain string so it works for every identity
+   * plugin without referencing the host's plugin union.
+   *
+   * Documented: docs/superpowers/specs/2026-05-25-trevox-gws-probe-miss-rca.md
+   *             — Recommendation A in the parent web repo.
+   *
+   * @param agencyId  - Tenant scope for the counter.
+   * @param pluginKey - Identity-source plugin key (e.g. 'google-workspace').
+   */
+  recordProviderAuthFailure?: (agencyId: string, pluginKey: string) => Promise<void>;
+  /**
+   * Optional provider-auth failure counter (read).
+   *
+   * Companion to {@link recordProviderAuthFailure}. The platform-health
+   * orchestrator calls this after a successful synthetic probe — if the
+   * rolling count over `windowSeconds` is at or above the configured
+   * threshold, the orchestrator mutates the otherwise-OK liveness result
+   * to ok:false / errorCategory:'unknown' so the checker maps the source
+   * to `degraded` and emits the matching state-change + notification.
+   *
+   * Returns 0 when the host hasn't registered a counter (web-only
+   * deployments, unit tests). Never throws; backing impl is bounded.
+   *
+   * @param agencyId      - Tenant scope.
+   * @param pluginKey     - Identity-source plugin key.
+   * @param windowSeconds - Lookback window. The counter is approximate —
+   *                        backed by a TTL'd Redis key, not a sliding
+   *                        window — so callers must keep this aligned with
+   *                        the host's recordProviderAuthFailure TTL.
+   */
+  getProviderAuthFailureCount?: (
+    agencyId: string,
+    pluginKey: string,
+    windowSeconds: number,
+  ) => Promise<number>;
+  /**
    * Optional revocation engine, registered by the host. Used by the
    * workflow engine's `revoke_access` action. When undefined (e.g. in the
    * Bull worker, where webpack's require.context-based plugin loader is
