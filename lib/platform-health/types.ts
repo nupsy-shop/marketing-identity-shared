@@ -43,8 +43,16 @@ export interface HealthCheckInput {
 export interface LivenessResult {
   ok: boolean;
   latencyMs: number;
-  /** Categorized error: 'auth' | 'network' | 'server' | 'unknown'. */
-  errorCategory?: 'auth' | 'network' | 'server' | 'unknown';
+  /**
+   * Categorized error:
+   *  - `auth`     → checker flips to `needs_reauth`
+   *  - `network`/`server`/`unknown` → checker flips to `error`
+   *  - `flap`     → checker flips to `degraded`. Used by the orchestrator
+   *                 when the synthetic probe succeeded but the
+   *                 provider-auth failure counter is above threshold
+   *                 (see PROVIDER_AUTH_FAILURE_THRESHOLD).
+   */
+  errorCategory?: 'auth' | 'network' | 'server' | 'unknown' | 'flap';
   errorMessage?: string;
 }
 
@@ -68,3 +76,19 @@ export const DEBOUNCE_WINDOW_MS = 5 * 60 * 1000;
 
 /** Uptime computation window (days). */
 export const UPTIME_WINDOW_DAYS = 30;
+
+/**
+ * Provider-auth failure counter window (seconds). The user-call boundary
+ * (`getValidAccessToken` and equivalents) increments a Redis-backed counter
+ * when a per-request token refresh fails; the next probe tick reads it over
+ * this window. Aligned with the host's record TTL.
+ */
+export const PROVIDER_AUTH_FAILURE_WINDOW_SECONDS = 15 * 60;
+
+/**
+ * Threshold above which an otherwise-OK synthetic probe is downgraded to
+ * `degraded`. Three failures in a 15-min window is enough signal that
+ * something flaky is happening at the provider's end, while leaving room
+ * for one-off transients to be absorbed silently.
+ */
+export const PROVIDER_AUTH_FAILURE_THRESHOLD = 3;

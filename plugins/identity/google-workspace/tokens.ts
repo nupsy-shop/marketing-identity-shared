@@ -70,7 +70,22 @@ interface OAuthTokenRow {
 export async function getValidAccessToken(
   agencyId: string,
 ): Promise<ValidAccessToken | null> {
-  const { prisma, logger } = getRuntime();
+  const { prisma, logger, recordProviderAuthFailure } = getRuntime();
+
+  // Fire-and-forget signal that the platform-health probe consults on its
+  // next tick. Surfaces per-request transients (Google's OAuth endpoint
+  // blipping for a single in-flight refresh between two successful probe
+  // ticks) as `degraded` even when the synthetic probe just succeeded
+  // against the same provider. See RCA
+  // docs/superpowers/specs/2026-05-25-trevox-gws-probe-miss-rca.md in the
+  // web repo. Host registration is optional; in web-only deployments and
+  // unit tests this is a no-op.
+  const recordFailure = (): void => {
+    if (!recordProviderAuthFailure) return;
+    void recordProviderAuthFailure(agencyId, PLUGIN_KEY).catch(() => {
+      /* counter must never break the auth path */
+    });
+  };
 
   const token = (await prisma.oauth_tokens.findFirst({
     where: {
@@ -82,7 +97,10 @@ export async function getValidAccessToken(
     orderBy: { createdAt: 'desc' },
   })) as OAuthTokenRow | null;
 
-  if (!token) return null;
+  if (!token) {
+    recordFailure();
+    return null;
+  }
 
   const expiresAtMs = token.expiresAt ? token.expiresAt.getTime() : 0;
   const isExpired = Date.now() > expiresAtMs - TOKEN_EXPIRY_BUFFER_MS;
@@ -99,6 +117,7 @@ export async function getValidAccessToken(
         >,
       };
     }
+    recordFailure();
     logger.error(
       '[gws-tokens] Refresh failed — agency must reconnect GWS',
       { agencyId },
@@ -107,6 +126,7 @@ export async function getValidAccessToken(
   }
 
   if (isExpired && !token.refreshToken) {
+    recordFailure();
     logger.error(
       '[gws-tokens] Token expired and no refresh token stored — agency must reconnect GWS',
       { agencyId },

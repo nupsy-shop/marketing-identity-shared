@@ -48,6 +48,14 @@ export function evaluateHealth(input: HealthCheckInput): HealthCheckOutcome {
     if (liveness.errorCategory === 'auth') {
       newState = 'needs_reauth';
       reason = `Liveness auth failure: ${liveness.errorMessage || 'unauthenticated'}`;
+    } else if (liveness.errorCategory === 'flap') {
+      // Synthetic probe just succeeded against this provider, but the
+      // user-call boundary has observed enough per-request auth failures
+      // recently to warrant a `degraded` signal. The orchestrator
+      // synthesises this category when the provider-auth failure counter
+      // is above threshold — see runHealthChecksForAgencyByPlugin.
+      newState = 'degraded';
+      reason = `Per-request transient flap: ${liveness.errorMessage || 'failure counter above threshold'}`;
     } else {
       newState = 'error';
       reason = `Liveness failure (${liveness.errorCategory || 'unknown'}): ${liveness.errorMessage || 'unknown error'}`;

@@ -41,7 +41,11 @@ import { dispatchNotification } from '../notifications/dispatch.js';
 import { evaluateHealth } from './checker.js';
 import { decideNotify } from './debounce.js';
 import { fetchRecentTransitions } from './es-query.js';
-import { DEBOUNCE_WINDOW_MS } from './types.js';
+import {
+  DEBOUNCE_WINDOW_MS,
+  PROVIDER_AUTH_FAILURE_THRESHOLD,
+  PROVIDER_AUTH_FAILURE_WINDOW_SECONDS,
+} from './types.js';
 import type { HealthCheckOutcome, LivenessResult } from './types.js';
 
 interface SourceForLiveness {
@@ -120,15 +124,57 @@ export async function runHealthChecksForAgencyByPlugin(
 
   const results: CheckedSource[] = [];
 
+  const { getProviderAuthFailureCount } = getRuntime();
+
   for (const row of sources) {
     try {
-      const liveness = await livenessFn({
+      let liveness = await livenessFn({
         id: row.id,
         agencyId,
         pluginKey: row.plugin_key,
         connectionState: row.connection_state,
         connectionConfig: row.connection_config as Record<string, unknown> | null,
       });
+
+      // Per-request failure-counter augmentation: even when the synthetic
+      // probe just succeeded against this provider, a sustained pattern of
+      // user-call refresh failures observed in the last window flips the
+      // source to `degraded`. This catches the failure mode where Google's
+      // OAuth token endpoint flaps for individual in-flight requests but
+      // recovers between probe ticks (see
+      // docs/superpowers/specs/2026-05-25-trevox-gws-probe-miss-rca.md in
+      // the web repo).
+      //
+      // Hosts that haven't registered the counter (web-only deployments,
+      // unit tests) skip this path entirely — no behaviour change.
+      // Counter-read errors are non-fatal: the synthetic-probe result wins.
+      if (liveness?.ok && getProviderAuthFailureCount) {
+        try {
+          const failures = await getProviderAuthFailureCount(
+            agencyId,
+            row.plugin_key,
+            PROVIDER_AUTH_FAILURE_WINDOW_SECONDS,
+          );
+          if (failures >= PROVIDER_AUTH_FAILURE_THRESHOLD) {
+            liveness = {
+              ok: false,
+              latencyMs: liveness.latencyMs,
+              errorCategory: 'flap',
+              errorMessage:
+                `${failures} per-request auth failure(s) in last ` +
+                `${PROVIDER_AUTH_FAILURE_WINDOW_SECONDS}s ` +
+                `(synthetic probe succeeded; degrading on counter)`,
+            };
+          }
+        } catch (err: unknown) {
+          logger.warn('platform-health: failure-counter read failed (non-fatal)', {
+            agencyId,
+            pluginKey,
+            sourceId: row.id,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
 
       const checked = await runHealthCheckForSource({
         agencyId,
