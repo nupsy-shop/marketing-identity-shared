@@ -3,6 +3,27 @@
  *
  * Uses the SEARCHBOX_URL env var provisioned by the SearchBox Heroku add-on.
  * Provides low-level index management and document operations.
+ *
+ * E2E ES override primitive
+ * ─────────────────────────
+ * When `getRuntime().resolveProviderOverride` is registered AND a matching
+ * `provider_response_overrides` row exists for the calling agency with
+ * `provider='elasticsearch'`, the `search()` function short-circuits the
+ * real ES network call and returns the stubbed response. This mechanism is
+ * the E2E "ES network-intercept mock primitive" — same seam as HTTP-provider
+ * mocking (provider_response_overrides table), same agency-scoping and TTL.
+ *
+ * The override is gated on `is_test_tenant` inside `resolveProviderOverride`
+ * (resolved from the web-app runtime) so production agencies are never
+ * affected.
+ *
+ * To register a stub from an E2E scenario:
+ *   npx tsx tests/support/scripts/seed/set-provider-response.ts \
+ *     --agency-id <uuid> --provider elasticsearch \
+ *     --endpoint-match <es-path-substring> --status 200 \
+ *     --body-json '<es-response-json>' --e2e-tag <tag>
+ *
+ * Issue: #1640
  */
 
 export interface SearchOptions {
@@ -217,6 +238,58 @@ export async function bulkIndex(docs: AuditDocument[]): Promise<{ errors: boolea
   return res.json();
 }
 
+// ─── E2E ES Override Helper ──────────────────────────────────────────────────
+
+/**
+ * Extract the first `agency.id` term value from a bool-must ES query body.
+ * Returns undefined when the query body does not carry a term filter (e.g.
+ * aggregation-only queries issued without a tenant scope — these fall through
+ * to real ES unconditionally).
+ */
+function extractAgencyId(queryBody: Record<string, unknown>): string | undefined {
+  try {
+    const must = (queryBody as any)?.query?.bool?.must;
+    if (!Array.isArray(must)) return undefined;
+    for (const clause of must) {
+      const termAgency = clause?.term?.['agency.id'];
+      if (typeof termAgency === 'string' && termAgency.length > 0) return termAgency;
+    }
+  } catch {
+    // malformed query body — fail open, real ES handles it
+  }
+  return undefined;
+}
+
+/**
+ * Attempt to resolve an E2E ES override for this query.
+ *
+ * Fail-closed: any error returns null so the real ES call proceeds.
+ * This function MUST NOT throw.
+ */
+async function resolveEsOverride(
+  agencyId: string,
+  idx: string,
+): Promise<{ status: number; body: unknown; delayMs?: number } | null> {
+  try {
+    const { getRuntime } = await import('../runtime.js');
+    let runtime: ReturnType<typeof getRuntime> | null = null;
+    try {
+      runtime = getRuntime();
+    } catch {
+      return null; // runtime not initialised — dev/test without setRuntime
+    }
+    const resolve = runtime?.resolveProviderOverride;
+    if (!resolve) return null;
+
+    // Use the index pattern as the "url" key so endpoint_match can target
+    // e.g. 'audit-*' or a specific monthly pattern. The provider name is
+    // 'elasticsearch' — a new discriminant on the shared table.
+    return await resolve(agencyId, 'elasticsearch', idx);
+  } catch {
+    return null;
+  }
+}
+
 export async function search(
   queryBody: Record<string, unknown>,
   indices?: string,
@@ -225,6 +298,26 @@ export async function search(
   aggregations?: Record<string, { buckets?: Array<{ key: string; doc_count: number }> }>;
 }> {
   const idx = indices || allIndicesPattern();
+
+  // ── E2E ES override intercept ────────────────────────────────────────────
+  // Consult the provider_response_overrides table (via runtime.resolveProviderOverride)
+  // before making any real ES network call. Only fires for is_test_tenant agencies.
+  const agencyId = extractAgencyId(queryBody);
+  if (agencyId) {
+    const override = await resolveEsOverride(agencyId, idx);
+    if (override !== null) {
+      // Honour stub delay (simulates slow ES for timeout-branch tests).
+      if (override.delayMs && override.delayMs > 0) {
+        await new Promise((r) => setTimeout(r, override.delayMs));
+      }
+      // Return the stubbed ES response body directly.
+      return override.body as {
+        hits: { total: number | { value: number }; hits: Array<{ _source: Record<string, unknown> }> };
+        aggregations?: Record<string, { buckets?: Array<{ key: string; doc_count: number }> }>;
+      };
+    }
+  }
+  // ── End ES override intercept ────────────────────────────────────────────
   // `ignore_unavailable=true&allow_no_indices=true` — when callers pass
   // a comma-separated list of specific monthly indices (e.g.
   // `audit-2026.05,audit-2026.04,audit-2026.03`), one or more of the
