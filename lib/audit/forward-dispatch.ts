@@ -55,6 +55,11 @@ export async function enqueueForwardJobs(
     // Host doesn't expose a queue (e.g. tests). Silently skip.
     return;
   }
+  // Host's Prisma client doesn't know this table yet — the consumer
+  // bumped the shared pointer BEFORE its own audit-settings migration
+  // landed. Treat as "no destinations configured" — same outcome as
+  // an empty findMany — rather than throwing on every audit publish.
+  if (typeof prisma.audit_destinations?.findMany !== 'function') return;
 
   const destinations = await prisma.audit_destinations.findMany({
     where: { agency_id: agencyId, enabled: true },
