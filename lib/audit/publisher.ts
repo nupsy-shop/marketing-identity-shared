@@ -24,6 +24,8 @@ import { Prisma } from '@prisma/client';
 import { getRuntime } from '../runtime.js';
 import { canonicalizeBody, sha256Hex } from './canonicalize.js';
 import { putAuditBody, auditBodyKey } from './minio-archive.js';
+import { enqueueForwardJobs } from './forward-dispatch.js';
+import type { AuditEvent } from '../../plugins/audit-destinations/common/audit-destination-plugin.interface.js';
 
 // ─── Public input contract (preserved) ──────────────────────────────────────
 
@@ -50,6 +52,14 @@ interface PreparedEvent {
   timestamp: Date;
   bodyBytes: Buffer;     // RFC 8785 JCS bytes
   bodySha256: string;    // hex
+  /**
+   * Plugin-facing event shape, built alongside the canonical body. Used
+   * by forward-dispatch / per-destination filters at flush time.
+   * Kept on the PreparedEvent so we don't re-parse the canonical JSON
+   * (which would lose typing) and don't snapshot the full input payload
+   * (which carries unbounded `context`).
+   */
+  forwardable: AuditEvent;
 }
 
 // ─── Buffer ──────────────────────────────────────────────────────────────────
@@ -98,12 +108,21 @@ function prepareEvent(input: AuditEventPayload): PreparedEvent | null {
   const eventId = crypto.randomUUID();
   const timestamp = new Date();
 
+  const eventType = input.eventType ?? input.type ?? 'unknown';
+  const source = input.source ?? 'accesshive';
+  const severityIn = input.severity ?? 'info';
+  // Narrow severity to the AuditDestination filter enum. Unknown values
+  // collapse to 'info' so a typo in a publish call cannot accidentally
+  // hide events from a destination's minSeverity filter.
+  const severity: AuditEvent['severity'] =
+    severityIn === 'warning' || severityIn === 'critical' ? severityIn : 'info';
+
   const canonical = canonicalizeBody({
     eventId,
     timestamp: timestamp.toISOString(),
-    eventType: input.eventType ?? input.type ?? 'unknown',
-    source: input.source ?? 'accesshive',
-    severity: input.severity ?? 'info',
+    eventType,
+    source,
+    severity,
     actor: {
       id: input.actor?.id ?? null,
       email: input.actor?.email ?? null,
@@ -115,12 +134,42 @@ function prepareEvent(input: AuditEventPayload): PreparedEvent | null {
     context: input.context ?? {},
   });
   const bodyBytes = Buffer.from(canonical, 'utf8');
+
+  const forwardable: AuditEvent = {
+    eventId,
+    timestamp: timestamp.toISOString(),
+    eventType,
+    severity,
+    source,
+    actor: {
+      ...(input.actor?.id    ? { id:    input.actor.id    } : {}),
+      ...(input.actor?.email ? { email: input.actor.email } : {}),
+      ...(input.actor?.name  ? { name:  input.actor.name  } : {}),
+      ...(input.actor?.type  ? { type:  input.actor.type  } : {}),
+    },
+    agency: {
+      id: agencyId,
+      ...(input.agency?.slug ? { slug: input.agency.slug } : {}),
+    },
+    ...(input.resource
+      ? {
+          resource: {
+            ...(input.resource.type ? { type: input.resource.type } : {}),
+            ...(input.resource.id   ? { id:   input.resource.id   } : {}),
+            ...(input.resource.name ? { name: input.resource.name } : {}),
+          },
+        }
+      : {}),
+    ...(input.context ? { context: input.context } : {}),
+  };
+
   return {
     eventId,
     agencyId,
     timestamp,
     bodyBytes,
     bodySha256: sha256Hex(bodyBytes),
+    forwardable,
   };
 }
 
@@ -152,6 +201,14 @@ async function flush(): Promise<void> {
   const { enqueueJob } = getRuntime();
   if (enqueueJob) {
     await Promise.all(batch.map(e => enqueueJob('audit_index_es', { eventId: e.eventId })));
+  }
+
+  // 4. Fan out to audit-destination forwarders per agency. Fire-and-forget;
+  //    delivery failures surface via destination row counters (recordFailure),
+  //    not via this code path. Never block or throw out of the publisher.
+  for (const [agencyId, events] of byAgency) {
+    enqueueForwardJobs(agencyId, events.map(e => e.forwardable))
+      .catch(err => console.warn('[Audit] enqueueForwardJobs failed:', (err as Error).message));
   }
 }
 

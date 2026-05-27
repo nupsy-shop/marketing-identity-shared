@@ -48,6 +48,7 @@ export const QUEUE_NAMES = {
   SYSTEM: 'system',
   AUDIT_INDEXING: 'audit-indexing', // ← audit log indexing & ES reconciliation
   AUDIT_SEALING: 'audit-sealing',  // ← audit log sealing, TSA retry, archive snapshots
+  AUDIT_FORWARDING: 'audit-forwarding', // ← per-plugin audit-event forwarding to external destinations
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -271,6 +272,26 @@ export const JOB_CATALOG = {
   audit_seal:               { queue: QUEUE_NAMES.AUDIT_SEALING },
   audit_tsa_retry:          { queue: QUEUE_NAMES.AUDIT_SEALING },
   audit_archive_snapshot:   { queue: QUEUE_NAMES.AUDIT_SEALING },
+
+  // ─── Audit forwarding (per-plugin, fired from publisher.flush) ──────
+  // One job type per audit-destination plugin. The publisher's
+  // `enqueueForwardJobs` (lib/audit/forward-dispatch.ts) dispatches one
+  // job per (batch × enabled destination); the per-plugin processor in
+  // shared/plugins/audit-destinations/{key}/processors/ owns the
+  // formatBatch + sendBatch call and the stat-row update via
+  // lib/audit-destinations/stats.ts.
+  //
+  // BullMQ retry is intentionally disabled on this queue at the worker
+  // layer (attempts: 1) — `recordFailure` owns the retry semantics
+  // (5-failure auto-disable). Bull's own retry would double-count.
+  webhook_forward_batch:    { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+  slack_forward_batch:      { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+  datadog_forward_batch:    { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+  splunk_forward_batch:     { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+  pagerduty_forward_batch:  { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+  s3_forward_batch:         { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+  syslog_forward_batch:     { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+  cef_syslog_forward_batch: { queue: QUEUE_NAMES.AUDIT_FORWARDING },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
@@ -299,6 +320,10 @@ export const TENANT_SCOPED_QUEUES: ReadonlySet<QueueName> = new Set<QueueName>([
   QUEUE_NAMES.PROVISIONING,
   QUEUE_NAMES.NOTIFICATIONS,
   QUEUE_NAMES.BULK_OPS,
+  // Every audit-forward job carries `agencyId` (its destination row is
+  // owned by an agency); RLS scope and the tenant-dashboard fan-out
+  // counters both want it bucketed per-tenant.
+  QUEUE_NAMES.AUDIT_FORWARDING,
 ]);
 
 export function isTenantScopedQueue(queue: unknown): queue is QueueName {

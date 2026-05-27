@@ -13,5 +13,13 @@
   "salesforce": "./platforms/salesforce/processors/index.js",
   "notification-webhook": "./notifications/webhook/processors/index.js",
   "notification-email": "./notifications/email/processors/index.js",
-  "notification-slack": "./notifications/slack/processors/index.js"
+  "notification-slack": "./notifications/slack/processors/index.js",
+  "audit-destination-webhook": "./audit-destinations/webhook/processors/index.js",
+  "audit-destination-slack": "./audit-destinations/slack/processors/index.js",
+  "audit-destination-datadog": "./audit-destinations/datadog/processors/index.js",
+  "audit-destination-splunk": "./audit-destinations/splunk/processors/index.js",
+  "audit-destination-pagerduty": "./audit-destinations/pagerduty/processors/index.js",
+  "audit-destination-s3": "./audit-destinations/s3/processors/index.js",
+  "audit-destination-syslog": "./audit-destinations/syslog/processors/index.js",
+  "audit-destination-cef-syslog": "./audit-destinations/cef-syslog/processors/index.js"
 }
