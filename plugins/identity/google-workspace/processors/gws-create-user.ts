@@ -13,6 +13,7 @@ import type Bull from 'bull';
 import { reconcileProvisioningStatus } from '../../../../lib/provisioningReconciler.js';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { ProviderStatus } from '../../../../lib/provisioning-types.js';
+import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
 
 interface JobResult {
   status: 'completed';
@@ -146,6 +147,24 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     logger.info('gws_create_user: user provisioned in Google Workspace', {
       jobId: String(job.id), identityId, userId: result.userId, created: String(result.created),
     });
+
+    // Emit canonical audit event for dedicated identity provisioned via GWS.
+    // Fire-and-forget: a publisher hiccup must not fail the job.
+    publishAuditEvent({
+      eventType: 'identity.dedicated.provisioned',
+      source: 'accesshive',
+      severity: 'info',
+      actor: { id: null, type: 'system' },
+      agency: { id: tenantId },
+      resource: { type: 'identity', id: identityId, name: identity.name ?? undefined },
+      context: {
+        identityId,
+        provider: 'google-workspace',
+        externalUserId: result.userId,
+        jobId: String(job.id),
+        _legacyEvent: 'IDENTITY_PROVISIONED',
+      },
+    }).catch(() => {});
 
     // 7. Sync readiness to Keycloak (if Keycloak already provisioned)
     if (identity.keycloak_user_id) {

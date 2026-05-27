@@ -19,6 +19,7 @@ import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { createKeycloakUser, isKeycloakAdminConfigured } from '../../../../lib/keycloakAdmin.js';
 import { reconcileProvisioningStatus } from '../../../../lib/provisioningReconciler.js';
+import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
 
 interface JobResult {
   status: 'completed' | 'skipped';
@@ -160,6 +161,28 @@ export default async function keycloakCreateUser(job: Bull.Job): Promise<JobResu
       'Dedicated identity provisioned in Keycloak',
       { jobId: job.id, tenantId, identityId, keycloakUserId: keycloakUser.id },
     );
+
+    // Emit the canonical audit event for bull-side Keycloak provisioning.
+    // Fire-and-forget: the identity is already provisioned; a publisher
+    // hiccup must not fail the job. The legacy alias 'IDENTITY_PROVISIONED'
+    // maps to the dotted form 'identity.dedicated.provisioned' in the
+    // publisher's MAP (preserved here via _legacyEvent for observer back-compat).
+    publishAuditEvent({
+      eventType: 'identity.dedicated.provisioned',
+      source: 'accesshive',
+      severity: 'info',
+      actor: { id: null, type: 'system' },
+      agency: { id: tenantId },
+      resource: { type: 'identity', id: identityId, name: identity.name ?? undefined },
+      context: {
+        identityId,
+        keycloakUserId: keycloakUser.id,
+        realm,
+        identityType,
+        jobId: String(job.id),
+        _legacyEvent: 'IDENTITY_PROVISIONED',
+      },
+    }).catch(() => {});
   } catch (err) {
     await prisma.integration_identities.updateMany({
       where: { id: identityId },
