@@ -22,5 +22,6 @@
   "audit-destination-s3": "./audit-destinations/s3/processors/index.js",
   "audit-destination-syslog": "./audit-destinations/syslog/processors/index.js",
   "audit-destination-cef-syslog": "./audit-destinations/cef-syslog/processors/index.js",
-  "audit-retention": "./audit-retention/processors/index.js"
+  "audit-retention": "./audit-retention/processors/index.js",
+  "audit-export": "./audit-export/processors/index.js"
 }

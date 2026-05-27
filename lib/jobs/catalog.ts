@@ -49,6 +49,7 @@ export const QUEUE_NAMES = {
   AUDIT_INDEXING: 'audit-indexing', // ← audit log indexing & ES reconciliation
   AUDIT_SEALING: 'audit-sealing',  // ← audit log sealing, TSA retry, archive snapshots
   AUDIT_FORWARDING: 'audit-forwarding', // ← per-plugin audit-event forwarding to external destinations
+  AUDIT_EXPORT: 'audit-export', // ← scheduled CSV/JSON/NDJSON exports (cron + run-now)
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -298,6 +299,15 @@ export const JOB_CATALOG = {
   s3_forward_batch:         { queue: QUEUE_NAMES.AUDIT_FORWARDING },
   syslog_forward_batch:     { queue: QUEUE_NAMES.AUDIT_FORWARDING },
   cef_syslog_forward_batch: { queue: QUEUE_NAMES.AUDIT_FORWARDING },
+
+  // ─── Audit export (scheduled CSV/JSON/NDJSON) ───────────────────────
+  // Repeatable per `audit_export_schedules` row (Bull jobId
+  // `audit-export:cron:{scheduleId}`) plus on-demand priority jobs from
+  // POST /api/agency/audit/exports/[id]/run (Bull jobId
+  // `audit-export:manual:{scheduleId}:{ISO}`). Processor owned by the
+  // shared `audit-export` plugin (concurrency 3, attempts 1 — failures
+  // recorded on the schedule row).
+  audit_export_run:         { queue: QUEUE_NAMES.AUDIT_EXPORT },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_CATALOG;
@@ -330,6 +340,9 @@ export const TENANT_SCOPED_QUEUES: ReadonlySet<QueueName> = new Set<QueueName>([
   // owned by an agency); RLS scope and the tenant-dashboard fan-out
   // counters both want it bucketed per-tenant.
   QUEUE_NAMES.AUDIT_FORWARDING,
+  // audit_export_run carries `agencyId` — schedule rows are agency-owned
+  // and the processor only reads/writes within that scope.
+  QUEUE_NAMES.AUDIT_EXPORT,
 ]);
 
 export function isTenantScopedQueue(queue: unknown): queue is QueueName {
