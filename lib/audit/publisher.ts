@@ -27,6 +27,73 @@ import { putAuditBody, auditBodyKey } from './minio-archive.js';
 import { enqueueForwardJobs } from './forward-dispatch.js';
 import type { AuditEvent } from '../../plugins/audit-destinations/common/audit-destination-plugin.interface.js';
 
+// ─── Body-strip on failure (publish-time redaction) ─────────────────────────
+//
+// When `agency_settings.audit_masking.stripBodiesOnFailure === true` and the
+// event's `context.outcome === 'failure'`, replace `context.body` with the
+// sentinel '[stripped]' BEFORE canonicalization. This is the only place a
+// write can be redacted before being chained — read-time masking can't
+// touch the WORM body or the hash chain.
+//
+// Settings are cached per-process with a 60s TTL to avoid hammering Postgres
+// on every publish. Cache is keyed by agencyId; falls back to "don't strip"
+// on any lookup error so the publish path stays non-blocking.
+
+interface MaskingCacheEntry {
+  stripBodiesOnFailure: boolean;
+  expiresAt: number;
+}
+const MASKING_CACHE_TTL_MS = 60_000;
+const _maskingCache = new Map<string, MaskingCacheEntry>();
+const STRIPPED_BODY_SENTINEL = '[stripped]';
+
+async function getStripBodiesOnFailure(agencyId: string): Promise<boolean> {
+  const now = Date.now();
+  const cached = _maskingCache.get(agencyId);
+  if (cached && cached.expiresAt > now) return cached.stripBodiesOnFailure;
+
+  const { prisma } = getRuntime();
+  if (!prisma?.agency_settings?.findUnique) {
+    // Runtime may not register prisma in some test contexts; default to false.
+    return false;
+  }
+  let stripBodiesOnFailure = false;
+  try {
+    const row = await prisma.agency_settings.findUnique({
+      where: { agency_id: agencyId },
+      select: { audit_masking: true },
+    });
+    const masking = row?.audit_masking;
+    if (masking && typeof masking === 'object' && masking.stripBodiesOnFailure === true) {
+      stripBodiesOnFailure = true;
+    }
+  } catch (err) {
+    // Don't block publish on settings-lookup failure; cache the negative
+    // briefly so we don't retry on every call.
+    console.warn('[Audit] masking-settings lookup failed:', (err as Error).message);
+  }
+  _maskingCache.set(agencyId, { stripBodiesOnFailure, expiresAt: now + MASKING_CACHE_TTL_MS });
+  return stripBodiesOnFailure;
+}
+
+async function maybeStripBody(input: AuditEventPayload, agencyId: string): Promise<AuditEventPayload> {
+  const ctx = input.context;
+  if (!ctx || typeof ctx !== 'object') return input;
+  if ((ctx as Record<string, unknown>).outcome !== 'failure') return input;
+  if (!('body' in ctx)) return input;
+  const strip = await getStripBodiesOnFailure(agencyId);
+  if (!strip) return input;
+  return {
+    ...input,
+    context: { ...ctx, body: STRIPPED_BODY_SENTINEL },
+  };
+}
+
+// Test seam.
+export function __resetMaskingCacheForTest(): void {
+  _maskingCache.clear();
+}
+
 // ─── Public input contract (preserved) ──────────────────────────────────────
 
 export interface AuditEventPayload {
@@ -309,7 +376,16 @@ async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Prom
  */
 export async function publishAuditEvent(input: AuditEventPayload): Promise<{ eventId: string } | null> {
   init();
-  const prepared = prepareEvent(input);
+  // Body-strip on failure must run BEFORE canonicalization so the hash
+  // chain reflects the stripped bytes. Resolve agency_id the same way
+  // prepareEvent does so we don't strip for un-chained system events.
+  const inputAgencyId = (input as Record<string, unknown>).agencyId;
+  const agencyId = input.agency?.id
+    ?? input.agency_id
+    ?? (typeof inputAgencyId === 'string' ? inputAgencyId : null)
+    ?? null;
+  const stripped = agencyId ? await maybeStripBody(input, agencyId) : input;
+  const prepared = prepareEvent(stripped);
   if (!prepared) return null;
   _buffer.push(prepared);
   if (_buffer.length >= BUFFER_SIZE) {
