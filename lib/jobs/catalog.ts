@@ -272,6 +272,12 @@ export const JOB_CATALOG = {
   audit_seal:               { queue: QUEUE_NAMES.AUDIT_SEALING },
   audit_tsa_retry:          { queue: QUEUE_NAMES.AUDIT_SEALING },
   audit_archive_snapshot:   { queue: QUEUE_NAMES.AUDIT_SEALING },
+  // Daily retention sweep (plugin-owned: shared/plugins/audit-retention/).
+  // Routed to AUDIT_SEALING so its concurrency=1 invariant guarantees
+  // only one sweep runs at a time across the fleet — matches the
+  // plugin's declared concurrency. Registered as a 02:00-UTC repeatable
+  // job in marketing-identity-bull's worker bootstrap.
+  audit_retention_sweep:    { queue: QUEUE_NAMES.AUDIT_SEALING },
 
   // ─── Audit forwarding (per-plugin, fired from publisher.flush) ──────
   // One job type per audit-destination plugin. The publisher's
