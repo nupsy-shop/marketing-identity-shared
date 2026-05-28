@@ -30,7 +30,7 @@
  */
 
 import { getRuntime } from '../../runtime.js';
-import { publishAuditEvent } from '../../audit/publisher.js';
+import { publishAuditEvent, flushAll } from '../../audit/publisher.js';
 import {
   listRealmIdentityProviders,
   getRealmIdentityProvider,
@@ -379,6 +379,15 @@ export default async function iamUpsertRealmIdp(
         error: scrubbed,
       },
     }).catch(() => { /* non-fatal — retry behavior must not be affected */ });
+
+    // Drain the publisher buffer so the just-emitted job.failed audit is
+    // queryable before this processor invocation returns. The SSO E2E
+    // suite polls for it with an 8s window; the 2s buffer flush interval
+    // would otherwise race against that window when the worker is between
+    // jobs.
+    try {
+      await flushAll();
+    } catch { /* non-fatal */ }
 
     throw err;
   }
