@@ -30,6 +30,7 @@
  */
 
 import { getRuntime } from '../../runtime.js';
+import { publishAuditEvent } from '../../audit/publisher.js';
 import {
   listRealmIdentityProviders,
   getRealmIdentityProvider,
@@ -361,6 +362,24 @@ export default async function iamUpsertRealmIdp(
       isFinalAttempt,
       error: scrubbed,
     });
+
+    // job.failed audit: deterministic observability for the SSO E2E suite
+    // (QaseID=660). Companion to the wrapper's job.enqueued emit (Task 1 of
+    // bull-queue-audit-observation spec). Fire-and-forget — a publisher
+    // hiccup must not change the processor's retry behavior.
+    publishAuditEvent({
+      eventType: 'job.failed',
+      severity: isFinalAttempt ? 'error' : 'warning',
+      agency: { id: agencyId },
+      context: {
+        jobType: 'iam_upsert_realm_idp',
+        jobId: String(jobId ?? ''),
+        attemptsMade,
+        isFinalAttempt,
+        error: scrubbed,
+      },
+    }).catch(() => { /* non-fatal — retry behavior must not be affected */ });
+
     throw err;
   }
 }
