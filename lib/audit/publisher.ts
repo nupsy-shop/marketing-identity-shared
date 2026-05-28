@@ -264,10 +264,19 @@ async function flush(): Promise<void> {
     await insertChainBatch(agencyId, events);
   }
 
-  // 3. Enqueue ES indexing.
+  // 3. Enqueue ES indexing — fire-and-forget. The audit chain commit
+  // (step 2) is the synchronous side channel callers observe; ES is a
+  // downstream read-path optimization that can fail independently
+  // without affecting chain integrity. If we await here, a stuck
+  // Bull/Redis connection blocks the route handler past Heroku's H12
+  // 30s cap.
   const { enqueueJob } = getRuntime();
   if (enqueueJob) {
-    await Promise.all(batch.map(e => enqueueJob('audit_index_es', { eventId: e.eventId })));
+    for (const e of batch) {
+      void enqueueJob('audit_index_es', { eventId: e.eventId }).catch((err: unknown) => {
+        console.warn('[Audit] ES-indexing enqueue failed:', (err as Error).message);
+      });
+    }
   }
 
   // 4. Fan out to audit-destination forwarders per agency. Fire-and-forget;
