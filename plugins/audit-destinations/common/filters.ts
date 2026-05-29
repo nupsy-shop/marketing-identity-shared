@@ -19,7 +19,10 @@ const SEVERITY_RANK: Record<AuditEvent['severity'], number> = {
 
 /**
  * Returns true if `event` passes ALL of the destination's filters:
- *   - source is in `filters.sources` (or sources is `['*']`)
+ *   - source is in `filters.sources` (or sources is `['*']`, or sources is
+ *     empty — empty means "no restriction", matching the dispatcher's
+ *     null-filter default of `['*']` and the wizard UX of "no filter
+ *     selected = forward everything")
  *   - severity rank >= minSeverity rank
  *   - event.eventType does not match any glob in excludePatterns
  *
@@ -28,8 +31,14 @@ const SEVERITY_RANK: Record<AuditEvent['severity'], number> = {
  * exact match. No other glob features.
  */
 export function matchesFilters(event: AuditEvent, filters: AuditDestinationFilters): boolean {
-  // Source check
-  if (!filters.sources.includes('*') && !filters.sources.includes(event.source)) {
+  // Source check — empty array means "no restriction" (the wizard sends
+  // `sources: []` when the admin leaves the source filter unset; before
+  // this normalization that silently rejected every event).
+  if (
+    filters.sources.length > 0 &&
+    !filters.sources.includes('*') &&
+    !filters.sources.includes(event.source)
+  ) {
     return false;
   }
 
