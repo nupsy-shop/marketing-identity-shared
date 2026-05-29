@@ -14,6 +14,7 @@ import { reconcileProvisioningStatus } from '../../../../lib/provisioningReconci
 import { getRuntime } from '../../../../lib/runtime.js';
 import { ProviderStatus } from '../../../../lib/provisioning-types.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
+import { validateScopesForMode } from '../tokens.js';
 
 interface JobResult {
   status: 'completed';
@@ -56,49 +57,104 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   }
 
   // 3. Resolve OAuth access token (with refresh if expired)
+  // Wrapped in try/catch so any throw here marks the provider status as
+  // ERROR before re-throwing — without this, OAuth-failure throws leave
+  // `provisioning_providers_status['google-workspace']` frozen at its
+  // prior value (FAILED/null), masking the failure mode from operators
+  // and downstream automations (#985 #1714).
   let accessToken: string | null = null;
-  if (source.oauth_token_id) {
-    const token = await prisma.oauth_tokens.findUnique({
-      where: { id: source.oauth_token_id },
-    });
-    if (token && token.isActive !== false) {
-      const expiresAt = token.expiresAt ? new Date(token.expiresAt).getTime() : 0;
-      const isExpired = Date.now() > expiresAt - 5 * 60 * 1000; // 5 min buffer
+  let tokenScopes: string[] = [];
+  try {
+    if (source.oauth_token_id) {
+      const token = await prisma.oauth_tokens.findUnique({
+        where: { id: source.oauth_token_id },
+      });
+      if (token && token.isActive !== false) {
+        tokenScopes = (token.scopes as string[]) ?? [];
+        const expiresAt = token.expiresAt ? new Date(token.expiresAt).getTime() : 0;
+        const isExpired = Date.now() > expiresAt - 5 * 60 * 1000; // 5 min buffer
 
-      if (isExpired && token.refreshToken) {
-        // Refresh the token
-        const refreshed = await refreshGoogleToken(prisma, token);
-        if (refreshed) {
-          accessToken = refreshed;
-        } else {
-          // Refresh failed — do NOT fall back to expired token.
-          // Using a stale token produces misleading 403 errors.
+        if (isExpired && token.refreshToken) {
+          // Refresh the token
+          const refreshed = await refreshGoogleToken(prisma, token);
+          if (refreshed) {
+            accessToken = refreshed;
+            // refreshGoogleToken updates the token row with the new scope
+            // string (if Google returned one); re-read to pick that up.
+            const refreshedToken = await prisma.oauth_tokens.findUnique({
+              where: { id: source.oauth_token_id },
+            });
+            tokenScopes = (refreshedToken?.scopes as string[]) ?? tokenScopes;
+          } else {
+            // Refresh failed — do NOT fall back to expired token.
+            // Using a stale token produces misleading 403 errors.
+            throw new Error(
+              'Google Workspace OAuth token refresh failed. The agency may need to reconnect Google Workspace in Settings → Identity Sources.'
+            );
+          }
+        } else if (isExpired && !token.refreshToken) {
           throw new Error(
-            'Google Workspace OAuth token refresh failed. The agency may need to reconnect Google Workspace in Settings → Identity Sources.'
+            'Google Workspace OAuth token expired and no refresh token is stored. The agency must reconnect Google Workspace in Settings → Identity Sources.'
           );
+        } else {
+          accessToken = token.accessToken;
         }
-      } else if (isExpired && !token.refreshToken) {
-        throw new Error(
-          'Google Workspace OAuth token expired and no refresh token is stored. The agency must reconnect Google Workspace in Settings → Identity Sources.'
-        );
-      } else {
-        accessToken = token.accessToken;
       }
     }
+
+    if (!accessToken) {
+      logger.error(
+        'gws_create_user: no valid OAuth token — agency may need to reconnect',
+        {
+          jobId: String(job.id),
+          tenantId,
+          identityId,
+          sourceId: source.id,
+          oauthTokenId: source.oauth_token_id,
+        },
+      );
+      throw new Error('No valid OAuth token for Google Workspace — will retry');
+    }
+  } catch (oauthErr) {
+    const errMsg = (oauthErr as Error).message;
+    await updateProviderStatus(prisma, identityId, 'google-workspace', {
+      status: ProviderStatus.ERROR,
+      error: errMsg,
+      updatedAt: new Date().toISOString(),
+    });
+    await reconcileProvisioningStatus(prisma, identityId);
+    throw oauthErr;
   }
 
-  if (!accessToken) {
-    logger.error(
-      'gws_create_user: no valid OAuth token — agency may need to reconnect',
+  // 3b. Scope pre-check — provisioning requires write scopes on the OAuth
+  // token. If the source was connected in READ_ONLY mode (a real legitimate
+  // configuration — read-only is the default for tenants who don't need
+  // synthetic provisioning) we skip cleanly with a SKIPPED status rather
+  // than wasting an Admin API call and surfacing a noisy 403. Operators
+  // who want provisioning must upgrade to PROVISIONING mode via the
+  // GWS source page (handleModeUpgrade in the layout).
+  const scopeCheck = validateScopesForMode(tokenScopes, 'PROVISIONING');
+  if (!scopeCheck.valid) {
+    await updateProviderStatus(prisma, identityId, 'google-workspace', {
+      status: ProviderStatus.SKIPPED,
+      reason:
+        `Google Workspace connected in READ_ONLY mode — provisioning skipped. ` +
+        `Upgrade to PROVISIONING mode in Settings → Identity Sources to enable ` +
+        `synthetic user creation. Missing scopes: ${scopeCheck.missing.join(', ')}`,
+      updatedAt: new Date().toISOString(),
+    });
+    await reconcileProvisioningStatus(prisma, identityId);
+    logger.info(
+      'gws_create_user: skipped — token lacks PROVISIONING scopes (READ_ONLY mode)',
       {
         jobId: String(job.id),
         tenantId,
         identityId,
         sourceId: source.id,
-        oauthTokenId: source.oauth_token_id,
+        missing: scopeCheck.missing,
       },
     );
-    throw new Error('No valid OAuth token for Google Workspace — will retry');
+    return { status: 'completed', jobType: 'gws_create_user' };
   }
 
   // 4. Resolve syntheticOrgUnitPath
