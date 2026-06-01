@@ -1,7 +1,7 @@
 /**
  * Approval Step Executor
  *
- * Creates a pam_approvals record and sets status to 'waiting'.
+ * Creates a workflow_approvals record and sets status to 'waiting'.
  * Resumes when onResult is called with the approval decision.
  * Supports timeout with escalation or auto-action.
  */
@@ -28,21 +28,24 @@ export async function execute(
   const approverRole: string = config.approverRole || 'admin';
   const approverType: string = config.approverType || 'role';
 
-  // Create a pam_approvals record linked to this workflow step
+  // Create a workflow_approvals record linked to this workflow step.
+  // (Migrated off the legacy pam_approvals table — that table was retired
+  // with the PAM session_grants migration; workflow approvals now live in
+  // their own workflow-native table.)
   const triggerData = context.trigger || {};
   const requestId: string = triggerData.requestId || triggerData.accessRequestId || 'workflow';
   const itemId: string = triggerData.itemId || triggerData.accessItemId || 'workflow';
   const platformId: string = triggerData.platformId || 'workflow';
   const requestedBy: string = triggerData.requestedBy || triggerData.userId || 'system';
 
-  const approval = await prisma.pam_approvals.create({
+  const approval = await prisma.workflow_approvals.create({
     data: {
-      requestId,
-      itemId,
-      platformId,
-      requestedBy,
+      request_id: requestId,
+      item_id: itemId,
+      platform_id: platformId,
+      requested_by: requestedBy,
       status: 'pending',
-      durationMinutes: config.timeoutMinutes || 1440,
+      duration_minutes: config.timeoutMinutes || 1440,
       agency_id: instance.agency_id,
     },
   });
@@ -52,7 +55,7 @@ export async function execute(
     source: 'accesshive',
     actor: { id: 'system', type: 'system' },
     agency: { id: instance.agency_id },
-    resource: { type: 'pam-approval', id: approval.id },
+    resource: { type: 'workflow-approval', id: approval.id },
     context: {
       instanceId: instance.id,
       stepId: step.id,
