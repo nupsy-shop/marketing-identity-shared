@@ -59,6 +59,29 @@ export type PolicyAction =
  * Bull job to enqueue. `null` means "do nothing" — e.g. a notify-only joiner
  * policy when no notification channel is configured.
  */
+
+/**
+ * Actions that are persisted into `agency_settings.jml_policies` but the engine
+ * does NOT execute yet — they resolve to `null` (no job) and, in the lifecycle
+ * processor, produce a `hold` row for operator approve/deny instead.
+ *
+ * MUST stay in sync with the app's server-owned enforcement registry
+ * (`lib/jml/enforcement-registry.ts` → `DEFERRED_ACTIONS`). A cross-repo parity
+ * test (`tests/unit/jml/policy-action-map-deferred.test.ts`) asserts they match
+ * so the two repos cannot drift. See docs/architecture/jml-enforcement-registry.md.
+ */
+export const DEFERRED_ACTIONS: ReadonlySet<string> = new Set([
+  'hold_review',
+  'manual_review',
+  'readonly_downgrade',
+  'open_access_request',
+]);
+
+/** True iff the action is configured-but-not-yet-enforced (a "hold"). */
+export function isDeferredAction(action: string | undefined | null): boolean {
+  return !!action && DEFERRED_ACTIONS.has(action);
+}
+
 export interface ResolvedAction {
   jobType: JobType;
   /** Extra static data to merge into the job payload. */

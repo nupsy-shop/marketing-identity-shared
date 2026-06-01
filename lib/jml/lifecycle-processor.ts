@@ -18,6 +18,7 @@ import {
   resolveSuspensionAction,
   resolveMoverGroupAction,
   resolveMoverAttributeAction,
+  isDeferredAction,
   type ResolvedAction,
 } from './policy-action-map.js';
 
@@ -354,12 +355,80 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
 
   let enqueued = 0;
 
+  // Create a `hold` row for a configured-but-deferred action so it surfaces in
+  // the Scheduled-queue "Needs your decision" list (operator approve/deny).
+  // Best-effort + heavily guarded: a failure here must never break lifecycle
+  // processing. Resolves the principal to its directory-user UUID and dedups by
+  // (user, trigger, action_type). See docs/architecture/jml-scheduled-queue.md.
+  const createHoldRow = async (
+    principal: string,
+    kind: 'joiner' | 'leaver' | 'suspension' | 'mover',
+    action: string,
+  ): Promise<void> => {
+    try {
+      if (!principal) return;
+      let userId: string | null = null;
+      if (pluginKey === 'google-workspace') {
+        const u = await prisma.gws_directory_users.findFirst({
+          where: { source_id: sourceId, email: principal },
+          select: { id: true },
+        });
+        userId = u?.id ?? null;
+      } else {
+        const u = await prisma.directory_users.findFirst({
+          where: { source_id: sourceId, OR: [{ email: principal }, { external_id: principal }] },
+          select: { id: true },
+        });
+        userId = u?.id ?? null;
+      }
+      if (!userId) {
+        logger.warn('[JML] hold: could not resolve directory user for principal', { kind, action });
+        return;
+      }
+
+      const actionType = `hold:${action}`;
+      const existing = await prisma.jml_scheduled_actions.findFirst({
+        where: { user_id: userId, trigger: kind, action_type: actionType, status: 'hold' },
+        select: { id: true },
+      });
+      if (existing) return;
+
+      await prisma.jml_scheduled_actions.create({
+        data: {
+          agency_id: agencyId,
+          user_id: userId,
+          user_email: principal,
+          action_type: actionType,
+          trigger: kind,
+          status: 'hold',
+          // Holds have no fire time — they wait for an operator decision. Stamp
+          // `scheduled_at` (NOT NULL) with now() for ordering; the scheduler
+          // ignores rows whose status !== 'pending'.
+          scheduled_at: new Date(),
+          automated: true,
+          trigger_source: `directory.${pluginKey}`,
+        },
+      });
+    } catch (err) {
+      logger.error('[JML] hold row creation failed', {
+        kind,
+        action,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
   const dispatchPrimary = async (
     principal: string,
+    action: string | undefined,
     primary: ResolvedAction | null,
     kind: 'joiner' | 'leaver' | 'suspension' | 'mover',
   ): Promise<void> => {
-    if (!primary) return;
+    if (!primary) {
+      // Deferred (configured-but-not-enforced) → produce an operator hold.
+      if (isDeferredAction(action)) await createHoldRow(principal, kind, action!);
+      return;
+    }
     const id = await enqueueJob(primary.jobType, {
       tenantId: agencyId,
       sourceId,
@@ -376,30 +445,32 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
   // dispatchNotification so routing is driven by the agency's
   // notification_channels config rather than hardcoded email_send jobs.
   for (const email of filteredJoiners) {
-    await dispatchPrimary(email, resolveJoinerAction(policies.joiner?.action as never, pluginKey), 'joiner');
+    const a = policies.joiner?.action as string | undefined;
+    await dispatchPrimary(email, a, resolveJoinerAction(a as never, pluginKey), 'joiner');
   }
   for (const email of filteredLeavers) {
-    await dispatchPrimary(email, resolveLeaverAction(policies.leaver?.action as never, pluginKey), 'leaver');
+    const a = policies.leaver?.action as string | undefined;
+    await dispatchPrimary(email, a, resolveLeaverAction(a as never, pluginKey), 'leaver');
   }
   for (const email of filteredSuspended) {
-    await dispatchPrimary(email, resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'suspend'), 'suspension');
+    const a = policies.suspension?.action as string | undefined;
+    await dispatchPrimary(email, a, resolveSuspensionAction(a as never, pluginKey, 'suspend'), 'suspension');
   }
   for (const email of filteredUnsuspended) {
-    await dispatchPrimary(email, resolveSuspensionAction(policies.suspension?.action as never, pluginKey, 'unsuspend'), 'suspension');
+    const a = policies.suspension?.action as string | undefined;
+    await dispatchPrimary(email, a, resolveSuspensionAction(a as never, pluginKey, 'unsuspend'), 'suspension');
   }
 
   for (const change of filteredGroupChanges) {
     const principal = change.userEmail || change.userExternalId || change.userId || '';
+    const addA = policies.mover?.on_group_addition?.action as string | undefined;
+    const remA = policies.mover?.on_group_removal?.action as string | undefined;
     for (const _groupId of change.added ?? []) {
-      await dispatchPrimary(principal, resolveMoverGroupAction(
-        policies.mover?.on_group_addition?.action as never, pluginKey, 'added',
-      ), 'mover');
+      await dispatchPrimary(principal, addA, resolveMoverGroupAction(addA as never, pluginKey, 'added'), 'mover');
       void _groupId;
     }
     for (const _groupId of change.removed ?? []) {
-      await dispatchPrimary(principal, resolveMoverGroupAction(
-        policies.mover?.on_group_removal?.action as never, pluginKey, 'removed',
-      ), 'mover');
+      await dispatchPrimary(principal, remA, resolveMoverGroupAction(remA as never, pluginKey, 'removed'), 'mover');
       void _groupId;
     }
   }
@@ -407,7 +478,8 @@ export async function processLifecycleEvents(params: ProcessLifecycleParams): Pr
   const attributeChanges = events.attributeChanges ?? [];
   for (const change of attributeChanges) {
     const principal = change.userEmail || change.userExternalId;
-    await dispatchPrimary(principal, resolveMoverAttributeAction(policies.mover, pluginKey), 'mover');
+    // Attribute changes always resolve to a job (never deferred) — pass no action.
+    await dispatchPrimary(principal, undefined, resolveMoverAttributeAction(policies.mover, pluginKey), 'mover');
   }
 
   processed = totalFiltered + filteredGroupChanges.length + attributeChanges.length;
