@@ -128,6 +128,14 @@ export const JOB_CATALOG = {
   refresh_access_analytics_for_agency:  { queue: QUEUE_NAMES.AUTOMATION },
   // issue #63 — monthly partner-hub access review digest.
   partner_access_review_for_agency:     { queue: QUEUE_NAMES.AUTOMATION },
+  // PAM expiry sweeps (every 10 min). Per-agency children of the
+  // dispatch_expire_* fan-out dispatchers. Replace the orphaned modern
+  // grant/checkout expiry that had zero production callers — the legacy
+  // expireOverdueSessions only covered the old pam_sessions table.
+  // Canonical logic: lib/session-grants/expire.ts and
+  // lib/checkout-approvals/expire.ts.
+  expire_grants_for_agency:             { queue: QUEUE_NAMES.AUTOMATION },
+  expire_checkout_approvals_for_agency: { queue: QUEUE_NAMES.AUTOMATION },
 
   // ─── Directory Sync (tenant-scoped) ─────────────────────────────────
   entra_sync_directory: { queue: QUEUE_NAMES.DIRECTORY_SYNC },
@@ -263,6 +271,9 @@ export const JOB_CATALOG = {
   dispatch_refresh_cost_optimization:    { queue: QUEUE_NAMES.SYSTEM }, // daily 03:00 #58
   dispatch_refresh_access_analytics:     { queue: QUEUE_NAMES.SYSTEM }, // hourly #59
   dispatch_partner_access_review:        { queue: QUEUE_NAMES.SYSTEM }, // daily 07:00, gated to 1st of month #63
+  // PAM expiry sweeps — fan out one *_for_agency child per active agency.
+  dispatch_expire_grants:                { queue: QUEUE_NAMES.SYSTEM }, // */10 modern session_grants TTL
+  dispatch_expire_checkout_approvals:    { queue: QUEUE_NAMES.SYSTEM }, // */10 stale PENDING checkout_approvals
 
   // ─── Audit indexing & sealing (system-scoped) ───────────────────────
   audit_index_es:     { queue: QUEUE_NAMES.AUDIT_INDEXING },
