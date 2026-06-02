@@ -4,6 +4,18 @@
  * Wraps Elasticsearch queries for the API layer.
  * ALWAYS injects agency.id filter for tenant isolation.
  * Powers both the Audit & Reports page and Activity tabs.
+ *
+ * Postgres mirror fallback (E2E_AUDIT_MIRROR_MODE=postgres):
+ *   When the env-flag is set AND an ES query returns 0 hits, the read path
+ *   falls back to the `audit_events_mirror` Postgres table which the E2E
+ *   harness dual-writes. This is the "Option B" seam from issue #1766 —
+ *   Searchly is at its max index count so new monthly ES indices cannot be
+ *   created and synthetic events are silently dropped. The mirror keeps the
+ *   E2E harness functional without upgrading the Searchly plan.
+ *
+ *   Default (env unset): ES-only; production behaviour unchanged.
+ *
+ * See docs/architecture/audit-postgres-mirror.md.
  */
 
 import { search, allIndicesPattern, indexNameForDate } from './client.js';
@@ -179,6 +191,114 @@ function computeIndices(dateFrom?: string | Date | null, dateTo?: string | Date 
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+// ─── Postgres mirror fallback (E2E only) ─────────────────────────────────────
+//
+// When E2E_AUDIT_MIRROR_MODE=postgres is set AND an ES query returns 0 hits,
+// fall back to reading from `audit_events_mirror`. This seam exists solely
+// because the hosted Searchly cluster is at its max index count and cannot
+// create new monthly indices for test events (#1766, Option B).
+//
+// The fallback is guarded by the env flag so production behaviour is
+// completely unchanged when the flag is absent.
+
+function isMirrorModeEnabled(): boolean {
+  return process.env.E2E_AUDIT_MIRROR_MODE === 'postgres';
+}
+
+async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<AuditQueryResult> {
+  const agencyId = filters.agencyId || filters.agency_id;
+  if (!agencyId) return { data: [], total: 0, limit: 50, offset: 0 };
+
+  const { getRuntime } = await import('../runtime.js');
+  const { prisma } = getRuntime();
+  if (!prisma) return { data: [], total: 0, limit: 50, offset: 0 };
+
+  const limit = Math.min(filters.limit || filters.size || 50, 200);
+  const offset = filters.offset || 0;
+  const sortOrder = filters.sortOrder || filters.sort || 'desc';
+
+  const where: Record<string, unknown> = { agencyId };
+
+  const eventType = filters.eventType;
+  if (eventType) {
+    if (typeof eventType === 'string' && eventType.endsWith('*')) {
+      where.eventType = { startsWith: eventType.replace('*', '') };
+    } else if (Array.isArray(eventType)) {
+      where.eventType = { in: eventType };
+    } else {
+      where.eventType = eventType;
+    }
+  }
+
+  const dateFrom = filters.dateFrom || filters.from;
+  const dateTo = filters.dateTo || filters.to;
+  if (dateFrom || dateTo) {
+    const capturedAt: Record<string, Date> = {};
+    if (dateFrom) capturedAt.gte = typeof dateFrom === 'string' ? new Date(dateFrom) : (dateFrom as Date);
+    if (dateTo) capturedAt.lte = typeof dateTo === 'string' ? new Date(dateTo) : (dateTo as Date);
+    where.capturedAt = capturedAt;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mirrorPrisma = prisma as any;
+  if (!mirrorPrisma.auditEventsMirror) {
+    // Table not yet migrated in this environment; return empty.
+    return { data: [], total: 0, limit, offset };
+  }
+
+  const [rows, total] = await Promise.all([
+    mirrorPrisma.auditEventsMirror.findMany({
+      where,
+      orderBy: { capturedAt: sortOrder },
+      take: limit,
+      skip: offset,
+      select: {
+        id: true,
+        agencyId: true,
+        eventType: true,
+        action: true,
+        severity: true,
+        source: true,
+        actorId: true,
+        actorEmail: true,
+        resourceId: true,
+        resourceType: true,
+        payload: true,
+        e2eTag: true,
+        capturedAt: true,
+      },
+    }),
+    mirrorPrisma.auditEventsMirror.count({ where }),
+  ]);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: AuditEvent[] = rows.map((row: any) => {
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    return {
+      id: row.id,
+      eventId: payload.eventId as string | undefined ?? row.id,
+      eventType: row.eventType,
+      type: row.eventType,
+      action: row.action,
+      severity: row.severity,
+      source: row.source,
+      timestamp: row.capturedAt instanceof Date ? row.capturedAt.toISOString() : String(row.capturedAt),
+      agency: { id: row.agencyId },
+      agency_id: row.agencyId,
+      actor: row.actorId || row.actorEmail
+        ? { id: row.actorId ?? null, email: row.actorEmail ?? null }
+        : undefined,
+      resource: row.resourceType || row.resourceId
+        ? { type: row.resourceType ?? undefined, id: row.resourceId ?? undefined }
+        : undefined,
+      context: (payload.context ?? {}) as Record<string, unknown>,
+      ...payload,
+    } as unknown as AuditEvent;
+  });
+
+  return { data, total, limit, offset };
+}
+
 export async function queryAuditEvents(filters: AuditQueryOptions): Promise<AuditQueryResult> {
   const queryBody = buildQuery(filters);
   const dateFrom = filters.dateFrom || filters.from;
@@ -195,6 +315,15 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
     const rawTotal = result.hits?.total;
     const total = typeof rawTotal === 'number' ? rawTotal : rawTotal?.value || 0;
 
+    // Mirror fallback: when ES returns 0 hits and the mirror mode is enabled,
+    // read from the Postgres mirror table instead. This covers the case where
+    // the hosted Searchly cluster is at its max index count and cannot index
+    // the event (issue #1766, Option B). Production behaviour (env unset) is
+    // completely unchanged.
+    if (total === 0 && isMirrorModeEnabled()) {
+      return queryAuditEventsFromMirror(filters);
+    }
+
     return {
       data: hits.map((h: any) => h._source) as unknown as AuditEvent[],
       total,
@@ -204,6 +333,10 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
   } catch (err: unknown) {
     const msg = (err as Error).message;
     if (msg.includes('404') || msg.includes('index_not_found')) {
+      // Mirror fallback on index-not-found (most likely cause of the failure).
+      if (isMirrorModeEnabled()) {
+        return queryAuditEventsFromMirror(filters);
+      }
       return { data: [], total: 0, limit: queryBody.size, offset: queryBody.from };
     }
     throw err;
