@@ -230,6 +230,12 @@ async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<A
     }
   }
 
+  // Resource-scoped queries (e.g. fetchStateChangesForSource) must only see
+  // events for the requested source; without these filters the uptime reducer
+  // would receive events from every source in the agency and produce wrong math.
+  if (filters.resourceType) where.resourceType = filters.resourceType;
+  if (filters.resourceId) where.resourceId = filters.resourceId;
+
   const dateFrom = filters.dateFrom || filters.from;
   const dateTo = filters.dateTo || filters.to;
   if (dateFrom || dateTo) {
