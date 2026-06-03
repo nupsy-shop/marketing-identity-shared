@@ -320,7 +320,7 @@ async function runHealthCheckForSource(
       dryRun,
     });
   } else if (!dryRun) {
-    publishAuditEvent({
+    await publishAuditEvent({
       eventType: 'identity.source.health_check',
       source: 'platform-health',
       severity: 'info',
@@ -376,7 +376,7 @@ async function emitTransition(opts: EmitOpts): Promise<boolean> {
   };
 
   if (!dryRun) {
-    publishAuditEvent({
+    await publishAuditEvent({
       eventType: 'identity.source.state_change',
       source: 'platform-health',
       severity: outcome.newState === 'connected' ? 'info' : 'warning',
