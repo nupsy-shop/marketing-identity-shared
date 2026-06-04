@@ -357,11 +357,25 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
     };
   } catch (err: unknown) {
     const msg = (err as Error).message;
+    // Mirror fallback on ANY ES error when mirror mode is enabled.
+    //
+    // Previous versions only caught 404 / index_not_found here. But
+    // Searchly (at max index count) can also return:
+    //   - Connection timeouts (ECONNRESET, ETIMEDOUT)
+    //   - 503 Service Unavailable
+    //   - Other 5xx cluster errors
+    // These bypass the 404-only guard, the error propagates to the API
+    // route's outer catch, which returns a 500 — and the mirror is never
+    // consulted, even though it has the 51 seeded rows.
+    //
+    // Fix: in mirror mode, any ES failure falls back to the mirror. We
+    // still preserve the non-mirror path (empty result for 404, re-throw
+    // for all other errors) so production behaviour is unchanged when the
+    // env flag is absent.
+    if (isMirrorModeEnabled()) {
+      return queryAuditEventsFromMirror(filters);
+    }
     if (msg.includes('404') || msg.includes('index_not_found')) {
-      // Mirror fallback on index-not-found (most likely cause of the failure).
-      if (isMirrorModeEnabled()) {
-        return queryAuditEventsFromMirror(filters);
-      }
       return { data: [], total: 0, limit: queryBody.size, offset: queryBody.from };
     }
     throw err;
