@@ -9,8 +9,15 @@
  */
 
 import crypto from 'crypto';
+import type { ReferenceCounts } from './role-template-references';
 
 // --- Types -------------------------------------------------------------------
+
+/**
+ * Reference-count summary for a Role Template. Re-uses the shape produced by
+ * `countTemplateReferences` so the API and UI share a single source of truth.
+ */
+export type RoleTemplateReferenceInfo = ReferenceCounts;
 
 export interface TemplateDefinition {
   key: string;
@@ -41,6 +48,8 @@ export interface RoleTemplate {
   createdAt: string;
   updatedAt: string;
   platformRoles: PlatformRole[];
+  /** Populated by GET handlers for the admin UI; absent on writes. */
+  references?: RoleTemplateReferenceInfo;
 }
 
 interface AccessItemType {
