@@ -321,13 +321,27 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
     const rawTotal = result.hits?.total;
     const total = typeof rawTotal === 'number' ? rawTotal : rawTotal?.value || 0;
 
-    // Mirror fallback: when ES returns 0 hits and the mirror mode is enabled,
-    // read from the Postgres mirror table instead. This covers the case where
-    // the hosted Searchly cluster is at its max index count and cannot index
-    // the event (issue #1766, Option B). Production behaviour (env unset) is
-    // completely unchanged.
-    if (total === 0 && isMirrorModeEnabled()) {
-      return queryAuditEventsFromMirror(filters);
+    // Mirror fallback: when ES returns fewer hits than one full page AND mirror
+    // mode is enabled, consult the Postgres mirror to see if it has a higher
+    // total. This handles two failure scenarios on the hosted Searchly cluster:
+    //
+    //   (a) ES index quota exhausted → synthetic E2E events are silently dropped
+    //       (the _bulk call returns 200 with errors:true). The current monthly
+    //       index may already hold *some* real events that ES can serve, giving
+    //       a non-zero but sub-page total. The old `total === 0` trigger missed
+    //       this case, so pagination thresholds (e.g. total > PAGE_SIZE=50)
+    //       were never reached even though 51+ events live in the mirror.
+    //
+    //   (b) ES returns 0 hits — existing behaviour, unchanged.
+    //
+    // We only switch to the mirror when `mirrorResult.total > total`, so a
+    // legitimate sparse result set (genuinely few events) is not overridden by
+    // an empty mirror. Production behaviour is completely unchanged (env unset).
+    if (total < queryBody.size && isMirrorModeEnabled()) {
+      const mirrorResult = await queryAuditEventsFromMirror(filters);
+      if (mirrorResult.total > total) {
+        return mirrorResult;
+      }
     }
 
     return {
