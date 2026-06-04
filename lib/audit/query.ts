@@ -321,23 +321,28 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
     const rawTotal = result.hits?.total;
     const total = typeof rawTotal === 'number' ? rawTotal : rawTotal?.value || 0;
 
-    // Mirror fallback: when ES returns fewer hits than one full page AND mirror
-    // mode is enabled, consult the Postgres mirror to see if it has a higher
-    // total. This handles two failure scenarios on the hosted Searchly cluster:
+    // Mirror fallback: when mirror mode is enabled, ALWAYS consult the Postgres
+    // mirror and use its result if it has a higher total than ES. This handles
+    // all failure scenarios on the hosted Searchly cluster:
     //
     //   (a) ES index quota exhausted → synthetic E2E events are silently dropped
     //       (the _bulk call returns 200 with errors:true). The current monthly
     //       index may already hold *some* real events that ES can serve, giving
-    //       a non-zero but sub-page total. The old `total === 0` trigger missed
-    //       this case, so pagination thresholds (e.g. total > PAGE_SIZE=50)
-    //       were never reached even though 51+ events live in the mirror.
+    //       a non-zero but sub-page total. The old `total < queryBody.size`
+    //       trigger missed the case where ES returns exactly page_size real
+    //       events (e.g. 50) — total is not < size so the mirror was never
+    //       consulted, and seeded PG events were invisible regardless of how
+    //       many were seeded.
     //
-    //   (b) ES returns 0 hits — existing behaviour, unchanged.
+    //   (b) ES returns 0 hits — handled by same always-check path.
+    //
+    //   (c) ES returns exactly page_size hits from real events — old trigger
+    //       `total < queryBody.size` was false; now we always check mirror.
     //
     // We only switch to the mirror when `mirrorResult.total > total`, so a
-    // legitimate sparse result set (genuinely few events) is not overridden by
-    // an empty mirror. Production behaviour is completely unchanged (env unset).
-    if (total < queryBody.size && isMirrorModeEnabled()) {
+    // legitimate dense ES result set is never overridden by a sparser mirror.
+    // Production behaviour is completely unchanged (env unset → flag is false).
+    if (isMirrorModeEnabled()) {
       const mirrorResult = await queryAuditEventsFromMirror(filters);
       if (mirrorResult.total > total) {
         return mirrorResult;
