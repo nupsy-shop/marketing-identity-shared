@@ -191,18 +191,24 @@ function computeIndices(dateFrom?: string | Date | null, dateTo?: string | Date 
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-// ─── Postgres mirror fallback (E2E only) ─────────────────────────────────────
+// ─── Postgres read projection (audit_events_mirror) ──────────────────────────
 //
-// When E2E_AUDIT_MIRROR_MODE=postgres is set AND an ES query returns 0 hits,
-// fall back to reading from `audit_events_mirror`. This seam exists solely
-// because the hosted Searchly cluster is at its max index count and cannot
-// create new monthly indices for test events (#1766, Option B).
+// The `audit_events_mirror` table is now written on every publish in ALL
+// environments (see publisher.ts → writeProjectionBatch), turning it from an
+// E2E-only seam into a first-class read projection. The hosted Searchly (ES)
+// cluster is at its max index count and silently drops new events (#1766 /
+// #1924), so resource-scoped reads cannot rely on ES alone.
 //
-// The fallback is guarded by the env flag so production behaviour is
-// completely unchanged when the flag is absent.
+// The fallback is therefore always available. The call sites only PREFER the
+// projection when its total exceeds the ES total, so a healthy/denser ES
+// result is never overridden by a sparser projection — when ES is serving
+// correctly, behaviour is unchanged.
+//
+// The legacy E2E_AUDIT_MIRROR_MODE env flag is retained for back-compat but is
+// no longer required to enable the fallback.
 
 function isMirrorModeEnabled(): boolean {
-  return process.env.E2E_AUDIT_MIRROR_MODE === 'postgres';
+  return true;
 }
 
 async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<AuditQueryResult> {
