@@ -264,6 +264,17 @@ async function flush(): Promise<void> {
     await insertChainBatch(agencyId, events);
   }
 
+  // 2.5. Read projection (audit_events_mirror). Best-effort and INTENTIONALLY
+  // outside the chain transaction: the hash chain + S3 body are the source of
+  // truth and must never be blocked or rolled back by a derived read model.
+  // This projection gives resource-scoped reads (getActivityForResource and
+  // every queryAuditEvents resource filter) a queryable Postgres source that
+  // does not depend on the capacity-capped Searchly cluster, whose index limit
+  // silently drops new events (#1766 / #1924). A failure here leaves the chain
+  // intact and is recoverable by replaying bodies from S3.
+  await writeProjectionBatch(batch).catch(err =>
+    console.warn('[Audit] read-projection write failed (non-fatal):', (err as Error).message));
+
   // 3. Enqueue ES indexing — fire-and-forget. The audit chain commit
   // (step 2) is the synchronous side channel callers observe; ES is a
   // downstream read-path optimization that can fail independently
@@ -286,6 +297,41 @@ async function flush(): Promise<void> {
     enqueueForwardJobs(agencyId, events.map(e => e.forwardable))
       .catch(err => console.warn('[Audit] enqueueForwardJobs failed:', (err as Error).message));
   }
+}
+
+// ─── Read projection (audit_events_mirror) ──────────────────────────────────
+//
+// Denormalized, queryable copy of each event for resource-scoped reads. Written
+// in ALL environments (the table used to be E2E-only) so that getActivityFor
+// resource / queryAuditEvents resource filters have a Postgres source that does
+// not depend on Searchly. Best-effort: never throws into flush(). Prod rows
+// carry an empty e2eTag; E2E synthetic rows (written by tests/support/audit-
+// writer.ts) carry their scenario tag.
+async function writeProjectionBatch(events: PreparedEvent[]): Promise<void> {
+  const { prisma } = getRuntime();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mirror = (prisma as any)?.auditEventsMirror;
+  if (!mirror) return; // delegate/table not present in this environment
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = events.map(e => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const f = e.forwardable as any;
+    return {
+      agencyId: e.agencyId,
+      eventType: f.eventType,
+      action: f.action ?? f.eventType,
+      severity: f.severity ?? 'info',
+      source: f.source ?? 'accesshive',
+      actorId: f.actor?.id ?? null,
+      actorEmail: f.actor?.email ?? null,
+      resourceId: f.resource?.id ?? null,
+      resourceType: f.resource?.type ?? null,
+      payload: f as Record<string, unknown>,
+      e2eTag: '',
+      capturedAt: e.timestamp,
+    };
+  });
+  await mirror.createMany({ data });
 }
 
 // ─── Chain insert with PK retry ─────────────────────────────────────────────
