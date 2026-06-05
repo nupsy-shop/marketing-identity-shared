@@ -24,7 +24,7 @@ interface JobResult {
 
 export default async function entraCreateUser(job: Bull.Job): Promise<JobResult> {
   const { tenantId, identityId, email, displayName, platformKey } = job.data;
-  const { prisma, logger } = getRuntime();
+  const { prisma, logger, resolveProviderOverride } = getRuntime();
 
   // 1. Load identity from DB — verify it still exists
   const identity = await prisma.integration_identities.findUnique({
@@ -61,6 +61,32 @@ export default async function entraCreateUser(job: Bull.Job): Promise<JobResult>
       identityId,
     });
     return { status: 'completed', jobType: 'entra_create_user' };
+  }
+
+  // 2b. E2E provider-override seam — check BEFORE access-token resolution so
+  // the entire credential + API path is bypassed when an override row exists.
+  // When a matching `provider_response_overrides` row exists for
+  // (tenantId, 'entra', GRAPH_USERS_API) the real Graph call is
+  // short-circuited and the forced response drives the happy-path so
+  // E2E scenarios can run without a live Entra connection.
+  {
+    const GRAPH_USERS_API = 'https://graph.microsoft.com/v1.0/users';
+    const e2eOverride = resolveProviderOverride
+      ? await resolveProviderOverride(tenantId, 'entra', GRAPH_USERS_API)
+      : null;
+    if (e2eOverride && e2eOverride.status >= 200 && e2eOverride.status < 300) {
+      const syntheticObjectId = `e2e-${identityId.slice(0, 8)}`;
+      await updateProviderStatus(prisma, identityId, 'entra-id', {
+        status: ProviderStatus.PROVISIONED,
+        externalId: syntheticObjectId,
+        updatedAt: new Date().toISOString(),
+      });
+      logger.info('entra_create_user: provider override short-circuited — PROVISIONED via E2E seam', {
+        jobId: String(job.id), identityId, syntheticObjectId,
+      });
+      await reconcileProvisioningStatus(prisma, identityId);
+      return { status: 'completed', jobType: 'entra_create_user' };
+    }
   }
 
   // 3. Resolve access token (OAuth first, client credentials fallback)
