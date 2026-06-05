@@ -23,7 +23,7 @@ interface JobResult {
 
 export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
   const { tenantId, identityId, email, displayName, platformKey } = job.data;
-  const { prisma, logger } = getRuntime();
+  const { prisma, logger, resolveProviderOverride } = getRuntime();
 
   // 1. Load identity from DB — verify it still exists
   const identity = await prisma.integration_identities.findUnique({
@@ -54,6 +54,32 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     await reconcileProvisioningStatus(prisma, identityId);
     logger.info('gws_create_user: no enabled GWS source, skipped', { jobId: String(job.id), identityId });
     return { status: 'completed', jobType: 'gws_create_user' };
+  }
+
+  // 2b. E2E provider-override seam — check BEFORE OAuth resolution so the
+  // entire credential + API path is bypassed when an override row exists.
+  // When a matching `provider_response_overrides` row exists for
+  // (tenantId, 'gws', GWS_USERS_API) the real Admin SDK call is
+  // short-circuited and the forced response drives the happy-path so
+  // E2E scenarios can run without a live GWS connection.
+  {
+    const GWS_USERS_API = 'https://admin.googleapis.com/admin/directory/v1/users';
+    const e2eOverride = resolveProviderOverride
+      ? await resolveProviderOverride(tenantId, 'gws', GWS_USERS_API)
+      : null;
+    if (e2eOverride && e2eOverride.status >= 200 && e2eOverride.status < 300) {
+      const syntheticUserId = `e2e-${identityId.slice(0, 8)}`;
+      await updateProviderStatus(prisma, identityId, 'google-workspace', {
+        status: ProviderStatus.PROVISIONED,
+        externalId: syntheticUserId,
+        updatedAt: new Date().toISOString(),
+      });
+      logger.info('gws_create_user: provider override short-circuited — PROVISIONED via E2E seam', {
+        jobId: String(job.id), identityId, syntheticUserId,
+      });
+      await reconcileProvisioningStatus(prisma, identityId);
+      return { status: 'completed', jobType: 'gws_create_user' };
+    }
   }
 
   // 3. Resolve OAuth access token (with refresh if expired)
@@ -179,7 +205,7 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     );
   }
 
-  // 5. Call GWS Admin API
+  // 5. Call GWS Admin API — real path (override seam was checked in step 2b).
   const { ensureUserInOu } = await import('./api/provisioning.js');
 
   const resolvedEmail = email || identity.identifier;
