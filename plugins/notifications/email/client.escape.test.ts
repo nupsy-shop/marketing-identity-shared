@@ -67,4 +67,26 @@ describe('buildEmailHtml — HTML escaping', () => {
     const html = buildEmailHtml(msg({ title: 'Acme & Co' }));
     expect(html).toContain('Acme &amp; Co');
   });
+
+  it("escapes single quotes to &#39;", () => {
+    const html = buildEmailHtml(msg({ title: "O'Brien & Sons" }));
+    expect(html).toContain('O&#39;Brien &amp; Sons');
+  });
+
+  it('escapes a literal <br> typed in the body (only real newlines become <br>)', () => {
+    const html = buildEmailHtml(msg({ body: 'a<br>b' }));
+    expect(html).toContain('a&lt;br&gt;b');
+    expect(html).not.toContain('a<br>b');
+  });
+
+  it.each([
+    ['protocol-relative', '//evil.com/x'],
+    ['uppercase javascript', 'JavaScript:alert(1)'],
+    ['whitespace-padded javascript', '   javascript:alert(1)   '],
+    ['vbscript', 'vbscript:msgbox(1)'],
+    ['embedded-tab javascript', 'java\tscript:alert(1)'],
+  ])('renders no button for a non-http(s) actionUrl (%s)', (_label, url) => {
+    const html = buildEmailHtml(msg({ actionUrl: url }));
+    expect(html).not.toContain('View in AccessHive');
+  });
 });
