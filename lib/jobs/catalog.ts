@@ -216,6 +216,7 @@ export const JOB_CATALOG = {
   // ─── Notifications (tenant-scoped) ──────────────────────────────────
   webhook_deliver: { queue: QUEUE_NAMES.NOTIFICATIONS },
   email_send:      { queue: QUEUE_NAMES.NOTIFICATIONS },
+  partner_invite_email: { queue: QUEUE_NAMES.NOTIFICATIONS },
   slack_notify:    { queue: QUEUE_NAMES.NOTIFICATIONS },
 
   // ─── Bulk Ops (tenant-scoped, user-initiated) ───────────────────────

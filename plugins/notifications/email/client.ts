@@ -45,14 +45,49 @@ export interface EmailSendResult {
 
 // ─── HTML builder ──────────────────────────────────────────────────────────
 
+/**
+ * Escape a value for safe interpolation into HTML text or a double-quoted
+ * attribute. Email titles/bodies can carry operator- or partner-authored free
+ * text (e.g. the partner-invite `note`), so every dynamic field rendered into
+ * markup MUST pass through here to prevent HTML/script injection in recipients'
+ * inboxes.
+ */
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Return the action URL only if it is a well-formed http(s) link; otherwise
+ * null (no button rendered). Blocks `javascript:`, `data:`, and other schemes
+ * that would turn the CTA into clickable XSS / a phishing vector. The caller
+ * still attribute-escapes the result before it lands in `href`.
+ */
+function safeActionUrl(url: string | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return trimmed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function buildEmailHtml(message: EmailNotificationMessage): string {
   const severityColor = SEVERITY_MAP[message.severity]?.color || '#3B82F6';
   const severityLabel = SEVERITY_MAP[message.severity]?.label || 'Info';
 
-  const actionButton = message.actionUrl
+  const safeUrl = safeActionUrl(message.actionUrl);
+  const actionButton = safeUrl
     ? `<tr>
         <td style="padding: 16px 0 0 0;">
-          <a href="${message.actionUrl}"
+          <a href="${escapeHtml(safeUrl)}"
              style="display: inline-block; padding: 10px 24px; background-color: #465FFF; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 14px; font-weight: 500;">
             View in AccessHive
           </a>
@@ -74,15 +109,15 @@ export function buildEmailHtml(message: EmailNotificationMessage): string {
             <td style="padding: 24px;">
               <table width="100%" cellpadding="0" cellspacing="0">
                 <tr><td><span style="display: inline-block; padding: 2px 8px; background-color: ${severityColor}20; color: ${severityColor}; border-radius: 4px; font-size: 12px; font-weight: 500; text-transform: uppercase;">${severityLabel}</span></td></tr>
-                <tr><td style="padding: 12px 0 0 0;"><h2 style="margin: 0; color: #111827; font-size: 18px; font-weight: 600;">${message.title}</h2></td></tr>
-                <tr><td style="padding: 8px 0 0 0; color: #4b5563; font-size: 14px; line-height: 1.6;">${message.body}</td></tr>
+                <tr><td style="padding: 12px 0 0 0;"><h2 style="margin: 0; color: #111827; font-size: 18px; font-weight: 600;">${escapeHtml(message.title)}</h2></td></tr>
+                <tr><td style="padding: 8px 0 0 0; color: #4b5563; font-size: 14px; line-height: 1.6;">${escapeHtml(message.body).replace(/\n/g, '<br>')}</td></tr>
                 ${actionButton}
               </table>
             </td>
           </tr>
           <tr>
             <td style="padding: 16px 24px; border-top: 1px solid #e5e7eb; background-color: #f9fafb;">
-              <p style="margin: 0; color: #9ca3af; font-size: 12px;">${message.eventType} &middot; ${message.timestamp}</p>
+              <p style="margin: 0; color: #9ca3af; font-size: 12px;">${escapeHtml(message.eventType)} &middot; ${escapeHtml(message.timestamp)}</p>
               <p style="margin: 4px 0 0 0; color: #9ca3af; font-size: 11px;">Sent by AccessHive. Manage notification preferences in Settings.</p>
             </td>
           </tr>
