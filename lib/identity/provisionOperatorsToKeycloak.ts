@@ -54,6 +54,41 @@ export async function enqueueOperatorProvisioning(args: {
     const parts = (op.name ?? '').trim().split(/\s+/);
     const firstName = parts[0] || op.email.split('@')[0];
     const lastName = parts.slice(1).join(' ') || 'User';
+    const fullName = `${firstName} ${lastName}`.trim();
+
+    // The `iam_provision_identity` handler keys all its work off
+    // `integration_identities.id`. Operators historically had no row, so the
+    // handler silently no-op'd and no Keycloak users were ever created on the
+    // reprovisioning path. Upsert (idempotent on the `(identifier, type)`
+    // unique index) so the handler has a real identity to provision.
+    const identity = await prisma.integration_identities.upsert({
+      where: {
+        identifier_type: {
+          identifier: op.email,
+          type: 'HUMAN_INTERACTIVE',
+        },
+      },
+      create: {
+        agency_id: agencyId,
+        type: 'HUMAN_INTERACTIVE',
+        identifier: op.email,
+        name: fullName || op.email,
+        ownership: 'AGENCY',
+        app_user_id: op.id,
+        provider: 'KEYCLOAK',
+        metadata: { source: 'operator_reprovisioning', originatingUserId: op.id },
+        updatedAt: new Date(),
+      },
+      update: {
+        // Keep app_user_id / name in sync; do NOT touch provisioning_status
+        // so the handler drives it normally.
+        agency_id: agencyId,
+        name: fullName || op.email,
+        app_user_id: op.id,
+        updatedAt: new Date(),
+      },
+      select: { id: true },
+    });
 
     const jobId = await enqueue(
       'iam_provision_identity',
@@ -61,6 +96,7 @@ export async function enqueueOperatorProvisioning(args: {
         tenantId: agencyId,
         triggeredBy,
         realm,
+        identityId: identity.id,
         email: op.email,
         firstName,
         lastName,
