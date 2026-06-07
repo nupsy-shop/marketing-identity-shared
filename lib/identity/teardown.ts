@@ -124,6 +124,15 @@ export async function teardownIdpForIdentity(
     }
     // Re-throw with a stable, payload-safe message. The route handler /
     // bull processor catches and records this in an audit event.
-    throw new Error(`Keycloak user delete failed: ${message}`);
+    //
+    // Include identity.id + keycloak_user_id + agency_id in the error so
+    // an operator reading a failed job_runs row can identify the affected
+    // identity without having to JSON-parse the payload column. Pre-fix,
+    // failures surfaced as "Keycloak user delete failed: Failed to delete
+    // Keycloak user (500):" with no actionable context.
+    throw new Error(
+      `Keycloak user delete failed for identity ${identity.id} ` +
+      `(keycloakUserId=${identity.keycloak_user_id}, agency=${identity.agency_id}): ${message}`,
+    );
   }
 }
