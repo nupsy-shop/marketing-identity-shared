@@ -326,7 +326,13 @@ export async function enableKeycloakUser(realm: string, userId: string, agencyId
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to enable Keycloak user (${res.status}): ${text}`);
+    // Include realm + userId so the failure is diagnosable from logs +
+    // job_runs alone (no need to cross-reference the job payload).
+    // Body is appended only when non-empty so the common case of
+    // Keycloak returning 5xx with no body doesn't end with ": ".
+    throw new Error(
+      `Failed to enable Keycloak user ${userId} in realm ${realm} (${res.status})${text ? `: ${text}` : ''}`,
+    );
   }
 }
 
@@ -344,7 +350,13 @@ export async function deleteKeycloakUser(realm: string, userId: string, agencyId
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to delete Keycloak user (${res.status}): ${text}`);
+    // Include realm + userId so the failure is diagnosable from logs +
+    // job_runs alone (no need to cross-reference the job payload).
+    // Body is appended only when non-empty so the common case of
+    // Keycloak returning 5xx with no body doesn't end with ": ".
+    throw new Error(
+      `Failed to delete Keycloak user ${userId} in realm ${realm} (${res.status})${text ? `: ${text}` : ''}`,
+    );
   }
 }
 
