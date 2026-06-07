@@ -380,6 +380,13 @@ async function insertChainBatch(agencyId: string, events: PreparedEvent[]): Prom
             eventId: e.eventId, timestamp: e.timestamp,
             bodyS3Key: auditBodyKey(agencyId, e.eventId),
             bodySha256: e.bodySha256,
+            // Populate the indexed `event_type` column so eventType-scoped
+            // reads (queryAuditEvents, the @BSCaseID=1430 freshness probe,
+            // SIEM index filters) can find the row without round-tripping
+            // through the WORM body. Without this, the column defaults to
+            // '' for every chain row and `where: { eventType: '<dotted>' }`
+            // returns zero matches even though the mirror has the event.
+            eventType: e.forwardable.eventType,
           };
           prevHash = eventHash;
           nextSeq += 1n;
