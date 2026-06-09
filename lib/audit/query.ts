@@ -23,7 +23,7 @@
  * See docs/architecture/audit-postgres-mirror.md.
  */
 
-import { search, allIndicesPattern, indexNameForDate } from './client.js';
+import { search, allIndicesPattern, indexNameForDate, rehydrateContext } from './client.js';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -174,7 +174,10 @@ function buildQuery(filters: AuditQueryOptions): EsQuery {
     must.push({
       multi_match: {
         query: filters.search,
-        fields: ['resource.name', 'actor.email', 'eventType', 'context.*'],
+        // `context` is indexed as the serialised `contextJson` text field
+        // (see sanitizeContextForEs); search it there, not the (now absent)
+        // structured `context.*` sub-paths.
+        fields: ['resource.name', 'actor.email', 'eventType', 'contextJson'],
         type: 'best_fields',
         fuzziness: 'AUTO',
       },
@@ -429,7 +432,9 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
     }
 
     return {
-      data: hits.map((h: any) => h._source) as unknown as AuditEvent[],
+      // Restore the structured `context` from the serialised `contextJson`
+      // field that the indexer writes (see rehydrateContext / sanitizeContextForEs).
+      data: hits.map((h: any) => rehydrateContext(h._source)) as unknown as AuditEvent[],
       total,
       limit: queryBody.size,
       offset: queryBody.from,
