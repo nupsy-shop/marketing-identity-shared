@@ -15,6 +15,8 @@
  *   const { prisma, logger } = getRuntime();
  */
 
+import { resolveProviderOverrideViaPrisma } from './http/provider-override-resolver.js';
+
 export interface RuntimeServices {
   prisma: any;
   logger: {
@@ -181,7 +183,26 @@ export interface RuntimeServices {
 const RUNTIME_KEY = Symbol.for('accesshive.runtime');
 
 export function setRuntime(services: RuntimeServices): void {
-  (globalThis as any)[RUNTIME_KEY] = services;
+  // Default the provider-override resolver so EVERY host honours
+  // `provider_response_overrides` — including the worker, which (unlike the web
+  // app) has no web-side resolver to inject. Hosts that register their own
+  // resolver keep it unchanged; hosts that don't get the shared, fail-closed,
+  // is_test_tenant-gated implementation. Real-customer traffic is never routed
+  // through a stub (the gate short-circuits on is_test_tenant=false).
+  const withDefaults: RuntimeServices = services.resolveProviderOverride
+    ? services
+    : {
+        ...services,
+        resolveProviderOverride: (agencyId, provider, url) =>
+          resolveProviderOverrideViaPrisma(
+            services.prisma,
+            services.logger,
+            agencyId,
+            provider,
+            url,
+          ),
+      };
+  (globalThis as any)[RUNTIME_KEY] = withDefaults;
 }
 
 export function clearRuntime(): void {
