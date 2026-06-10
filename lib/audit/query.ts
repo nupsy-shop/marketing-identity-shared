@@ -5,15 +5,20 @@
  * ALWAYS injects agency.id filter for tenant isolation.
  * Powers both the Audit & Reports page and Activity tabs.
  *
- * Postgres mirror fallback (E2E_AUDIT_MIRROR_MODE=postgres):
- *   When the env-flag is set AND an ES query returns 0 hits, the read path
- *   falls back to the `audit_events_mirror` Postgres table which the E2E
- *   harness dual-writes. This is the "Option B" seam from issue #1766 —
- *   Searchly is at its max index count so new monthly ES indices cannot be
- *   created and synthetic events are silently dropped. The mirror keeps the
- *   E2E harness functional without upgrading the Searchly plan.
+ * Postgres mirror read projection (`audit_events_mirror`):
+ *   `audit_events_mirror` is written on every publish in ALL environments
+ *   (publisher.ts → writeProjectionBatch) and is now ALWAYS consulted here —
+ *   the fallback is unconditional (isMirrorModeEnabled() returns true). On the
+ *   happy path the mirror result is preferred only when it is denser than ES
+ *   (`mirrorResult.total > ES total`), so a healthy ES result is never
+ *   overridden. On ANY ES error (not just 404 / index_not_found — also 5xx,
+ *   timeouts) the read path falls back to the mirror. This is the "Option B"
+ *   seam from issue #1766, promoted production-wide in #1924: Searchly is at
+ *   its max index count so new monthly ES indices cannot be created and events
+ *   are silently dropped.
  *
- *   Default (env unset): ES-only; production behaviour unchanged.
+ *   The legacy E2E_AUDIT_MIRROR_MODE env flag is retained for back-compat but
+ *   no longer gates this behaviour.
  *
  * See docs/architecture/audit-postgres-mirror.md.
  */
