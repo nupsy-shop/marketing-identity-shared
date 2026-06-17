@@ -61,6 +61,11 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
 
   const cfg = (source.connection_config ?? {}) as Record<string, unknown>;
 
+  // Once Step 1 revokes the Google grant, the stored token is dead — the local
+  // teardown MUST then run even if a later step fails, or the source is left
+  // pointing at a revoked token and the health probe pins it to `needs_reauth`.
+  let revoked = false;
+
   try {
     // Step 1 — revoke refresh token at Google
     if (source.oauth_token_id) {
@@ -79,21 +84,40 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
             throw new Error(`Google revoke failed: HTTP ${res.status}`);
           }
         }
+        revoked = true;
       }
     }
 
-    // Step 2 — delete Keycloak SAML client
+    // Step 2 — delete Keycloak SAML client (best-effort cleanup).
+    //
+    // This runs AFTER Step 1 has already revoked the Google refresh token, so a
+    // failure here must NOT abort the local teardown (Steps 4-5) — otherwise the
+    // source is left pointing at a now-dead token and the platform-health probe
+    // flips it to `needs_reauth` forever. We log + continue on any error; an
+    // orphaned SAML client is recoverable, a stranded revoked token is not.
+    //
+    // (The select uses the real snake_case columns `keycloak_realm` /
+    // `keycloak_realm_status`; the prior camelCase select threw `Unknown field`
+    // at runtime — undetected because `getRuntime().prisma` is `any` — which is
+    // exactly what was crashing every disconnect.)
     const spEntityId = cfg.samlSpEntityId as string | undefined;
     if (spEntityId && isKeycloakAdminConfigured()) {
-      // Inline of getAgencyKeycloakConfig(tenantId).
-      const settings = await prisma.agency_settings.findFirst({
-        where: { agency_id: tenantId },
-        select: { keycloakRealm: true, keycloakRealmStatus: true },
-      });
-      const keycloakRealm =
-        settings?.keycloakRealmStatus === 'active' ? settings.keycloakRealm : null;
-      if (keycloakRealm) {
-        await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
+      try {
+        const settings = await prisma.agency_settings.findFirst({
+          where: { agency_id: tenantId },
+          select: { keycloak_realm: true, keycloak_realm_status: true },
+        });
+        const keycloakRealm =
+          settings?.keycloak_realm_status === 'active' ? settings.keycloak_realm : null;
+        if (keycloakRealm) {
+          await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
+        }
+      } catch (kcErr) {
+        logger.warn('gws_disconnect: Keycloak SAML cleanup failed — continuing teardown', {
+          jobId,
+          sourceId,
+          error: kcErr instanceof Error ? kcErr.message : String(kcErr),
+        });
       }
     }
 
@@ -140,17 +164,36 @@ export default async function gwsDisconnect(job: Bull.Job): Promise<JobResult> {
     return { status: 'completed', jobType: 'gws_disconnect' };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // If the Google grant was already revoked, the token is dead regardless of
+    // what failed next — finish the teardown (null the token ref + mark
+    // disconnected) so the health probe stops re-flagging `needs_reauth`. Only
+    // when the revoke itself never succeeded do we fall back to `degraded` so a
+    // Bull retry can re-attempt against a still-live token.
     await prisma.identity_sources.update({
       where: { id: sourceId },
-      data: {
-        connection_state: 'degraded',
-        connection_config: {
-          ...cfg,
-          disconnect_error: message,
-          disconnect_error_at: new Date().toISOString(),
-        } as never,
-        updated_at: new Date(),
-      },
+      data: revoked
+        ? {
+            connection_state: 'disconnected',
+            oauth_token_id: null,
+            granted_scopes: [],
+            provisioning_enabled: false,
+            connection_config: {
+              ...stripSsoFields(cfg),
+              disconnectedAt: new Date().toISOString(),
+              disconnect_error: message,
+              disconnect_error_at: new Date().toISOString(),
+            } as never,
+            updated_at: new Date(),
+          }
+        : {
+            connection_state: 'degraded',
+            connection_config: {
+              ...cfg,
+              disconnect_error: message,
+              disconnect_error_at: new Date().toISOString(),
+            } as never,
+            updated_at: new Date(),
+          },
     }).catch(() => {});
 
     publishAuditEvent({
