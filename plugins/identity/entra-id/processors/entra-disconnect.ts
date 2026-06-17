@@ -68,24 +68,36 @@ export default async function entraDisconnect(job: Bull.Job): Promise<JobResult>
     // Step 1 — no-op for Entra (no refresh-token revoke endpoint).
     logger.info('entra_disconnect: step 1 (revoke) is a no-op for Entra — relying on token deactivation + TTL expiry', { jobId });
 
-    // Step 2 — delete Keycloak SAML client
+    // Steps 2-3 — delete Keycloak SAML client + Entra IdP broker (best-effort).
+    //
+    // Wrapped so a Keycloak failure does NOT abort the local teardown (Steps
+    // 4-5) — otherwise the source is left `degraded` with SSO config intact and
+    // the token still referenced. The select uses the real snake_case columns
+    // `keycloak_realm` / `keycloak_realm_status`; the prior camelCase select
+    // threw `Unknown field` at runtime (the worker's `getRuntime().prisma` is
+    // `any`, so TypeScript didn't catch it), crashing every Entra disconnect.
     if (isKeycloakAdminConfigured()) {
-      // Inline of getAgencyKeycloakConfig(tenantId): only use the realm
-      // when the agency has an active Keycloak realm configured.
-      const settings = await prisma.agency_settings.findFirst({
-        where: { agency_id: tenantId },
-        select: { keycloakRealm: true, keycloakRealmStatus: true },
-      });
-      const keycloakRealm =
-        settings?.keycloakRealmStatus === 'active' ? settings.keycloakRealm : null;
-      if (keycloakRealm) {
-        const spEntityId = cfg.samlSpEntityId as string | undefined;
-        if (spEntityId) {
-          await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
+      try {
+        const settings = await prisma.agency_settings.findFirst({
+          where: { agency_id: tenantId },
+          select: { keycloak_realm: true, keycloak_realm_status: true },
+        });
+        const keycloakRealm =
+          settings?.keycloak_realm_status === 'active' ? settings.keycloak_realm : null;
+        if (keycloakRealm) {
+          const spEntityId = cfg.samlSpEntityId as string | undefined;
+          if (spEntityId) {
+            await deleteKeycloakSamlClient(keycloakRealm, spEntityId);
+          }
+          // Step 3 — delete Entra IdP broker (single fixed alias)
+          await deleteRealmIdentityProvider(keycloakRealm, ENTRA_IDP_ALIAS);
         }
-
-        // Step 3 — delete Entra IdP broker (single fixed alias)
-        await deleteRealmIdentityProvider(keycloakRealm, ENTRA_IDP_ALIAS);
+      } catch (kcErr) {
+        logger.warn('entra_disconnect: Keycloak cleanup failed — continuing teardown', {
+          jobId,
+          sourceId,
+          error: kcErr instanceof Error ? kcErr.message : String(kcErr),
+        });
       }
     }
 
