@@ -191,7 +191,7 @@ const realDeps: ApplyKitDeps = {
             data: {
               email: m.email.toLowerCase(),
               displayName: [m.firstName, m.lastName].filter(Boolean).join(' ') || m.email.split('@')[0],
-              app_role: m.userType || 'client_operator',
+              app_role: m.userType || 'client_manager',
               agency_id: agencyId,
               source_id: agencyId,
               is_active: true,
@@ -215,7 +215,7 @@ const realDeps: ApplyKitDeps = {
             client_id_app_user_id_role: {
               client_id: clientId,
               app_user_id: appUserId,
-              role: 'client_operator',
+              role: 'client_manager',
             },
           } as never,
           update: {
@@ -227,7 +227,7 @@ const realDeps: ApplyKitDeps = {
             agency_id: agencyId,
             client_id: clientId,
             app_user_id: appUserId,
-            role: 'client_operator',
+            role: 'client_manager',
             role_template_key: m.roleTemplateKey ?? null,
             assigned_by: actorId ?? null,
           },
