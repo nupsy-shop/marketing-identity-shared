@@ -46,16 +46,20 @@ const logger = {
 
 /**
  * Persist the realm pointer + OIDC client refs onto agency_settings via the
- * host's Prisma client (works in web and the Bull worker). Upsert so a missing
- * settings row is created rather than throwing — the row normally exists
- * (create-agency makes it) but synthetic/migration callers may not.
+ * host's Prisma client (works in web and the Bull worker).
+ *
+ * Uses `update` (not `upsert`) keyed by agency_id, matching the sibling
+ * iam-delete-realm processor. The settings row always exists when provisioning
+ * runs — create-agency creates it before enqueueing the job. `upsert` is wrong
+ * here: Prisma validates the `create` branch even when the row exists, and the
+ * worker's agency_settings.id has no DB-default in its Prisma schema, so a
+ * `create` requires an explicit id and the whole call fails.
  */
 async function writeRealmSettings(agencyId: string, data: Record<string, unknown>): Promise<void> {
   const { prisma } = getRuntime();
-  await prisma.agency_settings.upsert({
+  await prisma.agency_settings.update({
     where: { agency_id: agencyId },
-    create: { agency_id: agencyId, ...data },
-    update: { ...data, updated_at: new Date() },
+    data: { ...data, updated_at: new Date() },
   });
 }
 
