@@ -67,6 +67,16 @@ export interface AuditQueryOptions {
   dateTo?: string | Date | null;
   size?: number;
   limit?: number;
+  /**
+   * Hard ceiling for the page size. Defaults to 200 — the page cap that
+   * protects the UI/list endpoints from unbounded fetches. Bulk/aggregation
+   * consumers that legitimately need every matching doc (the access-analytics
+   * trend warmer, audit export) opt into a higher ceiling by setting this
+   * alongside `limit`. Without it the default 200 cap silently truncates a
+   * `limit: 10000` request, so a 90-day trend rollup on a tenant with ≥200
+   * audit events saturates at 200 and never reflects newly-seeded events.
+   */
+  maxLimit?: number;
   offset?: number;
   severity?: string | null;
   sort?: 'asc' | 'desc';
@@ -153,7 +163,8 @@ function buildQuery(filters: AuditQueryOptions): EsQuery {
     });
   }
 
-  const limit = Math.min(filters.limit || filters.size || 50, 200);
+  const ceiling = filters.maxLimit && filters.maxLimit > 0 ? filters.maxLimit : 200;
+  const limit = Math.min(filters.limit || filters.size || 50, ceiling);
   const offset = filters.offset || 0;
   const sortField = filters.sortField || 'timestamp';
   const sortOrder = filters.sortOrder || filters.sort || 'desc';
@@ -224,7 +235,8 @@ async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<A
   const { prisma } = getRuntime();
   if (!prisma) return { data: [], total: 0, limit: 50, offset: 0 };
 
-  const limit = Math.min(filters.limit || filters.size || 50, 200);
+  const ceiling = filters.maxLimit && filters.maxLimit > 0 ? filters.maxLimit : 200;
+  const limit = Math.min(filters.limit || filters.size || 50, ceiling);
   const offset = filters.offset || 0;
   const sortOrder = filters.sortOrder || filters.sort || 'desc';
 

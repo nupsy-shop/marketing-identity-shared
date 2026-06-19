@@ -167,7 +167,13 @@ async function fetchTrendEvents(
         eventType,
         dateFrom: from,
         dateTo: endDay,
+        // The trend rollup must count EVERY granted/revoked event in the
+        // 90-day window — buildTrends aggregates per-day from raw events.
+        // `maxLimit` lifts the default 200 page cap that buildQuery (and the
+        // PG-mirror reader) otherwise apply, which would saturate the trend
+        // total at 200 on a busy tenant and hide freshly-seeded events.
         limit: 10000,
+        maxLimit: 10000,
       });
       for (const ev of result.data) {
         all.push({
