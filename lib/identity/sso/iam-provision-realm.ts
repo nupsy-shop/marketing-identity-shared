@@ -537,8 +537,12 @@ async function _createPamBrowserFlow(realmName: string) {
   // Set the sub-flow execution to ALTERNATIVE
   await _setExecutionRequirement(realmName, FLOW_ALIAS, subFlowAlias, 'ALTERNATIVE');
 
-  // Add Username Password Form to sub-flow (REQUIRED)
-  await _addExecution(realmName, subFlowAlias, 'auth-username-password-form', 'REQUIRED', FLOW_ALIAS);
+  // Add the PAM Login Form to sub-flow (REQUIRED). This is the custom SPI
+  // (provider id `pam-login-form`) — a drop-in replacement for Keycloak's
+  // `auth-username-password-form` that detects synthetic PAM identity logins
+  // and redirects to operator auth. The generic form does NOT do that, so the
+  // dedicated realm must use this one to match the working agency-trevox realm.
+  await _addExecution(realmName, subFlowAlias, 'pam-login-form', 'REQUIRED', FLOW_ALIAS);
 
   // Create conditional OTP sub-flow (CONDITIONAL), nested under the forms sub-flow
   const otpSubFlowAlias = `${FLOW_ALIAS}-conditional-otp`;
@@ -551,8 +555,11 @@ async function _createPamBrowserFlow(realmName: string) {
   // Add OTP form inside conditional sub-flow
   await _addExecution(realmName, otpSubFlowAlias, 'auth-otp-form', 'REQUIRED', FLOW_ALIAS);
 
-  // Add PAM Chooser to sub-flow (REQUIRED)
-  await _addExecution(realmName, subFlowAlias, 'pam-chooser-authenticator', 'REQUIRED', FLOW_ALIAS);
+  // Add the PAM Identity Chooser to sub-flow (REQUIRED). Custom SPI, provider
+  // id `pam-identity-chooser` (NOT `pam-chooser-authenticator`, which is not a
+  // registered provider — that wrong id 400'd and left provisioned realms
+  // WITHOUT the chooser, breaking synthetic-identity SAML assertion issuance).
+  await _addExecution(realmName, subFlowAlias, 'pam-identity-chooser', 'REQUIRED', FLOW_ALIAS);
 
   // Bind as browser flow
   await _bindBrowserFlow(realmName, FLOW_ALIAS);
