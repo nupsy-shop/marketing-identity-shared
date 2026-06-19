@@ -272,6 +272,21 @@ export function formatEventMessage(eventType: string, context: EventContext = {}
       body: `Drift on ${safe(ctx.platform)} has been resolved: ${safe(ctx.description)}.`,
       severity: 'info',
     },
+    'emergency_access.reveal.requested': {
+      title: 'Break-glass reveal requested',
+      body: 'A break-glass credential reveal was requested and needs your decision. Open the request to approve or deny.',
+      severity: 'warning',
+    },
+    'emergency_access.reveal.approved': {
+      title: 'Break-glass reveal approved',
+      body: 'Your break-glass credential reveal request was approved.',
+      severity: 'info',
+    },
+    'emergency_access.reveal.denied': {
+      title: 'Break-glass reveal denied',
+      body: 'Your break-glass credential reveal request was denied.',
+      severity: 'warning',
+    },
     'breakglass.credential.revealed': {
       title: 'Break-Glass Credential Revealed',
       body: `${safe(ctx.actor)} revealed break-glass credentials for ${safe(ctx.platform)}.`,
