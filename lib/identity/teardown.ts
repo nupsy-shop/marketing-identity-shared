@@ -57,6 +57,19 @@ export interface PrismaClientLike {
       select: { keycloak_realm: true };
     }): Promise<{ keycloak_realm: string | null } | null>;
   };
+  // Used by the shared-ownership guard (defense in depth): count OTHER rows
+  // that reference the same Keycloak user before deleting it. Both the web
+  // PrismaClient and the bull worker PrismaClient satisfy these structurally.
+  local_directory_users: {
+    count(args: {
+      where: { agency_id: string; keycloak_user_id: string };
+    }): Promise<number>;
+  };
+  integration_identities: {
+    count(args: {
+      where: { agency_id: string; keycloak_user_id: string; NOT: { id: string } };
+    }): Promise<number>;
+  };
 }
 
 type LogFn = (msg: string, meta?: Record<string, unknown>) => void;
@@ -102,6 +115,47 @@ export async function teardownIdpForIdentity(
     logger.debug('[teardown] agency has no keycloak_realm — skipping IdP teardown', {
       identityId: identity.id,
       agencyId: identity.agency_id,
+    });
+    return;
+  }
+
+  // ── Defense in depth: never delete a Keycloak user this identity does not
+  //    exclusively own. `createKeycloakUser` is idempotent on 409-by-email
+  //    (shared/lib/keycloakAdmin.ts), so an ephemeral integration identity can
+  //    silently inherit the keycloak_user_id of a REAL account — a persona /
+  //    SSO user backed by a `local_directory_users` row — or of another live
+  //    dedicated identity (reuse_per_platform). Tearing THIS row down must not
+  //    delete a Keycloak user another row still depends on. Confirm sole
+  //    ownership; if shared, skip the upstream delete (the caller still removes
+  //    this identity's own DB row). This is what stopped the recurring deletion
+  //    of the stable delivery QA persona's KC user mid @ui sweep.
+  let sharedWith: string | null = null;
+  try {
+    const [localUserRefs, otherIdentityRefs] = await Promise.all([
+      prisma.local_directory_users.count({
+        where: { agency_id: identity.agency_id, keycloak_user_id: identity.keycloak_user_id },
+      }),
+      prisma.integration_identities.count({
+        where: {
+          agency_id: identity.agency_id,
+          keycloak_user_id: identity.keycloak_user_id,
+          NOT: { id: identity.id },
+        },
+      }),
+    ]);
+    if (localUserRefs > 0) sharedWith = `${localUserRefs} local_directory_users row(s)`;
+    else if (otherIdentityRefs > 0) sharedWith = `${otherIdentityRefs} other integration_identities row(s)`;
+  } catch (err: unknown) {
+    // Fail CLOSED: if sole ownership can't be confirmed, do NOT delete. A
+    // leaked Keycloak user is recoverable (orphan scan / re-run); deleting a
+    // shared real account is not.
+    sharedWith = `ownership check failed (${err instanceof Error ? err.message : String(err)})`;
+  }
+  if (sharedWith) {
+    logger.warn('[teardown] keycloak user is shared (or ownership unconfirmed) — skipping IdP delete', {
+      identityId: identity.id,
+      keycloakUserId: identity.keycloak_user_id,
+      sharedWith,
     });
     return;
   }
