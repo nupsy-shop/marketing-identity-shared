@@ -287,10 +287,12 @@ async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<A
     return { data: [], total: 0, limit, offset };
   }
 
+  const orderByField = (filters.occurredFrom || filters.occurredTo) ? 'occurredAt' : 'capturedAt';
+
   const [rows, total] = await Promise.all([
     mirrorPrisma.auditEventsMirror.findMany({
       where,
-      orderBy: { capturedAt: sortOrder },
+      orderBy: { [orderByField]: sortOrder },
       take: limit,
       skip: offset,
       select: {
