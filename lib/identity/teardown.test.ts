@@ -31,6 +31,12 @@ const mockPrisma = {
       (args: unknown) => Promise<{ keycloak_realm: string | null } | null>
     >(),
   },
+  local_directory_users: {
+    count: jest.fn<(args: unknown) => Promise<number>>(),
+  },
+  integration_identities: {
+    count: jest.fn<(args: unknown) => Promise<number>>(),
+  },
 };
 
 const mockLogger = {
@@ -42,9 +48,14 @@ const mockLogger = {
 beforeEach(() => {
   deleteKeycloakUserMock.mockReset();
   mockPrisma.agency_settings.findFirst.mockReset();
+  mockPrisma.local_directory_users.count.mockReset();
+  mockPrisma.integration_identities.count.mockReset();
   mockLogger.debug.mockReset();
   mockLogger.warn.mockReset();
   mockLogger.error.mockReset();
+  // Default: the identity solely owns its Keycloak user (no other referrers).
+  mockPrisma.local_directory_users.count.mockResolvedValue(0);
+  mockPrisma.integration_identities.count.mockResolvedValue(0);
 });
 
 describe('teardownIdpForIdentity — agencyId forwarding (issue #1072)', () => {
@@ -94,5 +105,66 @@ describe('teardownIdpForIdentity — agencyId forwarding (issue #1072)', () => {
     ).rejects.toThrow(/Keycloak user delete failed/);
 
     expect(deleteKeycloakUserMock).toHaveBeenCalledWith('realm-1', 'kc-user-4', 'agency-trevox');
+  });
+});
+
+describe('teardownIdpForIdentity — shared-ownership guard (defense in depth)', () => {
+  it('skips the Keycloak delete when a local_directory_users row shares the keycloak_user_id (protects real/persona SSO accounts)', async () => {
+    mockPrisma.agency_settings.findFirst.mockResolvedValue({ keycloak_realm: 'realm-1' });
+    // A persona / real human account is backed by a local_directory_users row
+    // pointing at this same KC user — the ephemeral identity inherited it via
+    // createKeycloakUser's 409-by-email idempotency.
+    mockPrisma.local_directory_users.count.mockResolvedValue(1);
+
+    await teardownIdpForIdentity(
+      { id: 'ephemeral-1', agency_id: 'agency-trevox', keycloak_user_id: 'persona-kc-user' },
+      { prisma: mockPrisma as never, logger: mockLogger },
+    );
+
+    expect(deleteKeycloakUserMock).not.toHaveBeenCalled();
+    expect(mockLogger.warn).toHaveBeenCalled();
+  });
+
+  it('skips the Keycloak delete when another integration_identities row still references the keycloak_user_id (shared dedicated reuse)', async () => {
+    mockPrisma.agency_settings.findFirst.mockResolvedValue({ keycloak_realm: 'realm-1' });
+    mockPrisma.integration_identities.count.mockResolvedValue(1);
+
+    await teardownIdpForIdentity(
+      { id: 'dedicated-a', agency_id: 'agency-trevox', keycloak_user_id: 'shared-dedicated-kc' },
+      { prisma: mockPrisma as never, logger: mockLogger },
+    );
+
+    expect(deleteKeycloakUserMock).not.toHaveBeenCalled();
+  });
+
+  it('excludes the identity being torn down from the other-identity ownership check', async () => {
+    mockPrisma.agency_settings.findFirst.mockResolvedValue({ keycloak_realm: 'realm-1' });
+
+    await teardownIdpForIdentity(
+      { id: 'identity-9', agency_id: 'agency-trevox', keycloak_user_id: 'kc-user-9' },
+      { prisma: mockPrisma as never, logger: mockLogger },
+    );
+
+    expect(mockPrisma.integration_identities.count).toHaveBeenCalledWith({
+      where: {
+        agency_id: 'agency-trevox',
+        keycloak_user_id: 'kc-user-9',
+        NOT: { id: 'identity-9' },
+      },
+    });
+    // Sole owner (counts default 0) → delete proceeds.
+    expect(deleteKeycloakUserMock).toHaveBeenCalledWith('realm-1', 'kc-user-9', 'agency-trevox');
+  });
+
+  it('fails closed: skips the Keycloak delete when the ownership check itself throws', async () => {
+    mockPrisma.agency_settings.findFirst.mockResolvedValue({ keycloak_realm: 'realm-1' });
+    mockPrisma.local_directory_users.count.mockRejectedValue(new Error('db down'));
+
+    await teardownIdpForIdentity(
+      { id: 'identity-10', agency_id: 'agency-trevox', keycloak_user_id: 'kc-user-10' },
+      { prisma: mockPrisma as never, logger: mockLogger },
+    );
+
+    expect(deleteKeycloakUserMock).not.toHaveBeenCalled();
   });
 });
