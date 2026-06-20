@@ -231,7 +231,7 @@ function isMirrorModeEnabled(): boolean {
   return true;
 }
 
-async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<AuditQueryResult> {
+export async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<AuditQueryResult> {
   const agencyId = filters.agencyId || filters.agency_id;
   if (!agencyId) return { data: [], total: 0, limit: 50, offset: 0 };
 
