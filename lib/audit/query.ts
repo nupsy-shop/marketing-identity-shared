@@ -60,6 +60,10 @@ export interface AuditQueryOptions {
   target_id?: string | null;
   resourceType?: string | null;
   resourceId?: string | null;
+  identityId?: string | null;
+  sessionGrantId?: string | null;
+  occurredFrom?: Date | string | null;
+  occurredTo?: Date | string | null;
   clientId?: string | null;
   from?: string | Date | null;
   to?: string | Date | null;
@@ -258,6 +262,14 @@ async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<A
   // would receive events from every source in the agency and produce wrong math.
   if (filters.resourceType) where.resourceType = filters.resourceType;
   if (filters.resourceId) where.resourceId = filters.resourceId;
+  if (filters.identityId) where.identityId = filters.identityId;
+  if (filters.sessionGrantId) where.sessionGrantId = filters.sessionGrantId;
+  if (filters.occurredFrom || filters.occurredTo) {
+    const occurredAt: Record<string, Date> = {};
+    if (filters.occurredFrom) occurredAt.gte = new Date(filters.occurredFrom as string);
+    if (filters.occurredTo) occurredAt.lte = new Date(filters.occurredTo as string);
+    where.occurredAt = occurredAt;
+  }
 
   const dateFrom = filters.dateFrom || filters.from;
   const dateTo = filters.dateTo || filters.to;
@@ -292,6 +304,10 @@ async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<A
         actorEmail: true,
         resourceId: true,
         resourceType: true,
+        identityId: true,
+        sessionGrantId: true,
+        occurredAt: true,
+        attribution: true,
         payload: true,
         e2eTag: true,
         capturedAt: true,
@@ -321,6 +337,10 @@ async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Promise<A
         ? { type: row.resourceType ?? undefined, id: row.resourceId ?? undefined }
         : undefined,
       context: (payload.context ?? {}) as Record<string, unknown>,
+      identityId: row.identityId ?? null,
+      sessionGrantId: row.sessionGrantId ?? null,
+      occurredAt: row.occurredAt instanceof Date ? row.occurredAt.toISOString() : (row.occurredAt ?? null),
+      attribution: row.attribution ?? null,
       ...payload,
     } as unknown as AuditEvent;
   });
