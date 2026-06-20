@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { isResolvableEmail, deriveOccurredAt, deriveAttribution } from '../correlation';
+import { isResolvableEmail, deriveOccurredAt, deriveAttribution, resolveIdentityIdByEmail } from '../correlation';
 
 describe('isResolvableEmail', () => {
   it('accepts a normal email', () => {
@@ -17,6 +17,9 @@ describe('isResolvableEmail', () => {
   it('rejects null/empty', () => {
     expect(isResolvableEmail(null)).toBe(false);
     expect(isResolvableEmail('')).toBe(false);
+  });
+  it('rejects an address with an internal space', () => {
+    expect(isResolvableEmail('user @client.com')).toBe(false);
   });
 });
 
@@ -51,11 +54,16 @@ describe('deriveAttribution', () => {
   });
 });
 
-import { resolveIdentityIdByEmail } from '../correlation';
-
 describe('resolveIdentityIdByEmail', () => {
-  const make = (rows: Array<{ id: string }>) => ({
-    integration_identities: { findMany: async () => rows },
+  const make = (rows: Array<{ id: string }>, expectAgencyId = 'a') => ({
+    integration_identities: {
+      findMany: async (args: { where: { agency_id: string; identifier: { equals: string; mode: string } } }) => {
+        // Security-relevant: the query MUST be agency-scoped and case-insensitive.
+        expect(args.where.agency_id).toBe(expectAgencyId);
+        expect(args.where.identifier.mode).toBe('insensitive');
+        return rows;
+      },
+    },
   }) as unknown as import('@prisma/client').PrismaClient;
 
   it('returns the id on a single email match', async () => {

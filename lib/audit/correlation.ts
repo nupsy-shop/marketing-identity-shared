@@ -17,7 +17,9 @@ export function isResolvableEmail(email: string | null | undefined): boolean {
   if (!email) return false;
   const v = email.trim().toLowerCase();
   if (NON_EMAIL_SENTINELS.has(v)) return false;
-  // Minimal structural check: exactly one @, non-empty local + domain w/ a dot.
+  if (/\s/.test(v)) return false; // reject internal whitespace (e.g. "user @x.com")
+  // Heuristic structural check (NOT RFC 5322): exactly one @, non-empty local +
+  // domain with a dot. False positives are absorbed fail-closed by the resolver.
   const at = v.indexOf('@');
   if (at <= 0 || at !== v.lastIndexOf('@')) return false;
   const domain = v.slice(at + 1);
@@ -69,7 +71,10 @@ export async function resolveIdentityIdByEmail(
 ): Promise<string | null> {
   if (!isResolvableEmail(email)) return null;
   const rows = await prisma.integration_identities.findMany({
-    where: { agency_id: agencyId, identifier: (email as string).trim() },
+    where: {
+      agency_id: agencyId,
+      identifier: { equals: (email as string).trim(), mode: 'insensitive' },
+    },
     select: { id: true },
     take: 2,
   });
