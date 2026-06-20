@@ -25,6 +25,7 @@ import { getRuntime } from '../runtime.js';
 import { canonicalizeBody, sha256Hex } from './canonicalize.js';
 import { putAuditBody, auditBodyKey } from './minio-archive.js';
 import { enqueueForwardJobs } from './forward-dispatch.js';
+import { resolveIdentityIdByEmail, deriveOccurredAt, deriveAttribution } from './correlation.js';
 import type { AuditEvent } from '../../plugins/audit-destinations/common/audit-destination-plugin.interface.js';
 
 // ─── Body-strip on failure (publish-time redaction) ─────────────────────────
@@ -312,10 +313,34 @@ async function writeProjectionBatch(events: PreparedEvent[]): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mirror = (prisma as any)?.auditEventsMirror;
   if (!mirror) return; // delegate/table not present in this environment
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const data = events.map(e => {
+  const data = await Promise.all(events.map(async e => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const f = e.forwardable as any;
+    const ctx = (f.context ?? {}) as Record<string, unknown>;
+
+    // session_grant_id is a FIRST-PARTY fact only when AccessHive emitted it
+    // (lifecycle / brokered writes). Never resolved from external data.
+    const sessionGrantId =
+      typeof ctx.session_grant_id === 'string' ? ctx.session_grant_id
+      : typeof ctx.grantId === 'string' ? ctx.grantId
+      : null;
+
+    // identity_id is resolved ONLY for external events (no grant). For bound
+    // events the actor is the human operator, not the synthetic identity, so we
+    // never resolve it there.
+    let identityId: string | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (!sessionGrantId && (prisma as any)?.integration_identities) {
+      identityId = await resolveIdentityIdByEmail(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        prisma as any,
+        e.agencyId,
+        f.actor?.email ?? null,
+      );
+    }
+
     return {
       agencyId: e.agencyId,
       eventType: f.eventType,
@@ -329,9 +354,19 @@ async function writeProjectionBatch(events: PreparedEvent[]): Promise<void> {
       payload: f as Record<string, unknown>,
       e2eTag: '',
       capturedAt: e.timestamp,
+      // ── correlation index ──
+      identityId,
+      sessionGrantId,
+      occurredAt: deriveOccurredAt(ctx, e.timestamp),
+      attribution: deriveAttribution(sessionGrantId, identityId),
     };
-  });
+  }));
   await mirror.createMany({ data });
+}
+
+// Test seam — exercises the correlation logic without the buffer/flush machinery.
+export async function __writeProjectionBatchForTest(events: PreparedEvent[]): Promise<void> {
+  return writeProjectionBatch(events);
 }
 
 // ─── Chain insert with PK retry ─────────────────────────────────────────────
