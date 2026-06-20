@@ -1,3 +1,5 @@
+import type { PrismaClient } from '@prisma/client';
+
 /**
  * PAM session-recording correlation helpers.
  *
@@ -52,4 +54,24 @@ export function deriveAttribution(
   if (sessionGrantId) return 'bound';
   if (identityId) return 'windowed';
   return null;
+}
+
+/**
+ * Resolve a platform actor email to an integration_identities.id.
+ * Agency-scoped, fail-closed: returns null unless EXACTLY ONE identity in the
+ * agency has identifier === email. Ambiguity (>=2) or non-email -> null, so the
+ * recording omits the action rather than guessing.
+ */
+export async function resolveIdentityIdByEmail(
+  prisma: PrismaClient,
+  agencyId: string,
+  email: string | null | undefined,
+): Promise<string | null> {
+  if (!isResolvableEmail(email)) return null;
+  const rows = await prisma.integration_identities.findMany({
+    where: { agency_id: agencyId, identifier: (email as string).trim() },
+    select: { id: true },
+    take: 2,
+  });
+  return rows.length === 1 ? rows[0].id : null;
 }

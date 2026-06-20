@@ -50,3 +50,28 @@ describe('deriveAttribution', () => {
     expect(deriveAttribution(null, null)).toBeNull();
   });
 });
+
+import { resolveIdentityIdByEmail } from '../correlation';
+
+describe('resolveIdentityIdByEmail', () => {
+  const make = (rows: Array<{ id: string }>) => ({
+    integration_identities: { findMany: async () => rows },
+  }) as unknown as import('@prisma/client').PrismaClient;
+
+  it('returns the id on a single email match', async () => {
+    const id = await resolveIdentityIdByEmail(make([{ id: 'idy-1' }]), 'a', 'x@c.com');
+    expect(id).toBe('idy-1');
+  });
+  it('fails closed (null) on a non-email actor', async () => {
+    const id = await resolveIdentityIdByEmail(make([{ id: 'idy-1' }]), 'a', 'system');
+    expect(id).toBeNull();
+  });
+  it('fails closed (null) when multiple identities share the identifier', async () => {
+    const id = await resolveIdentityIdByEmail(make([{ id: 'idy-1' }, { id: 'idy-2' }]), 'a', 'x@c.com');
+    expect(id).toBeNull();
+  });
+  it('returns null when no identity matches', async () => {
+    const id = await resolveIdentityIdByEmail(make([]), 'a', 'x@c.com');
+    expect(id).toBeNull();
+  });
+});
