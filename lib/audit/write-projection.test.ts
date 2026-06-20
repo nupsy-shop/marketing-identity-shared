@@ -1,17 +1,37 @@
-import { describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const created: any[] = [];
-const fakePrisma = {
-  auditEventsMirror: { createMany: async ({ data }: any) => { created.push(...data); } },
-  integration_identities: {
-    findMany: async ({ where }: any) =>
-      where.identifier?.equals === 'syn@client.com' ? [{ id: 'idy-syn' }] : [],
-  },
-};
+const { created, fakePrisma } = vi.hoisted(() => {
+  const created: any[] = [];
+  const fakePrisma = {
+    auditEventsMirror: { createMany: async ({ data }: any) => { created.push(...data); } },
+    integration_identities: {
+      findMany: async ({ where }: any) =>
+        where.identifier?.equals === 'syn@client.com' ? [{ id: 'idy-syn' }] : [],
+    },
+  };
+  return { created, fakePrisma };
+});
 
-jest.mock('../../runtime.js', () => ({ getRuntime: () => ({ prisma: fakePrisma }) }));
+vi.mock('@prisma/client', () => ({
+  Prisma: { PrismaClientKnownRequestError: class {} },
+}));
 
-import { __writeProjectionBatchForTest } from '../publisher';
+vi.mock('canonicalize', () => ({
+  default: (v: unknown) => JSON.stringify(v),
+}));
+
+vi.mock('./minio-archive.js', () => ({
+  putAuditBody: vi.fn().mockResolvedValue(undefined),
+  auditBodyKey: (agencyId: string, eventId: string) => `${agencyId}/${eventId}.json`,
+}));
+
+vi.mock('./forward-dispatch.js', () => ({
+  enqueueForwardJobs: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../runtime.js', () => ({ getRuntime: () => ({ prisma: fakePrisma }) }));
+
+import { __writeProjectionBatchForTest } from './publisher';
 
 beforeEach(() => { created.length = 0; });
 

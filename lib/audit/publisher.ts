@@ -332,7 +332,7 @@ async function writeProjectionBatch(events: PreparedEvent[]): Promise<void> {
     // never resolve it there.
     let identityId: string | null = null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (!sessionGrantId && (prisma as any)?.integration_identities) {
+    if (!sessionGrantId) {
       identityId = await resolveIdentityIdByEmail(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         prisma as any,
