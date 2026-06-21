@@ -50,7 +50,9 @@ export interface AuditQueryOptions {
   eventType?: string | string[] | null;
   /** Match ANY of these event types. Entries ending in '*' are prefix matches,
    *  others are exact. Compiled to a where.OR of startsWith + `in`. Use for
-   *  multi-namespace sets (e.g. the PAM privileged-event set). */
+   *  multi-namespace sets (e.g. the PAM privileged-event set). Use INSTEAD of
+   *  `eventType` — passing both ANDs them (event must match `eventType` AND one
+   *  of the OR entries), which is rarely intended. */
   eventTypeAnyOf?: string[] | null;
   action?: string | null;
   actor_id?: string | null;
