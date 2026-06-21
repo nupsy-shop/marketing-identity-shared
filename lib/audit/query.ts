@@ -48,6 +48,10 @@ export interface AuditQueryOptions {
   agencyId?: string | null;
   type?: string | null;
   eventType?: string | string[] | null;
+  /** Match ANY of these event types. Entries ending in '*' are prefix matches,
+   *  others are exact. Compiled to a where.OR of startsWith + `in`. Use for
+   *  multi-namespace sets (e.g. the PAM privileged-event set). */
+  eventTypeAnyOf?: string[] | null;
   action?: string | null;
   actor_id?: string | null;
   actorEmail?: string | null;
@@ -255,6 +259,17 @@ export async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Pr
     } else {
       where.eventType = eventType;
     }
+  }
+
+  const anyOf = filters.eventTypeAnyOf;
+  if (anyOf && anyOf.length > 0) {
+    const prefixes = anyOf.filter((t) => t.endsWith('*')).map((t) => t.slice(0, -1));
+    const exact = anyOf.filter((t) => !t.endsWith('*'));
+    const or: Array<Record<string, unknown>> = [
+      ...prefixes.map((p) => ({ eventType: { startsWith: p } })),
+      ...(exact.length > 0 ? [{ eventType: { in: exact } }] : []),
+    ];
+    if (or.length > 0) where.OR = or;
   }
 
   // Resource-scoped queries (e.g. fetchStateChangesForSource) must only see
