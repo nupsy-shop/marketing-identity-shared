@@ -461,13 +461,31 @@ export async function queryAuditEvents(filters: AuditQueryOptions): Promise<Audi
   }
 }
 
+// Resource-scoped activity feed — powers the Campaign Activity tab
+// (lib/campaigns/get-activity.ts → GET /api/campaigns/[id]/activity) and the
+// SCIM connection test route.
+//
+// Reads the immutable Postgres mirror DIRECTLY (queryAuditEventsFromMirror)
+// rather than ES-first via queryAuditEvents. ES-first was unreliable on the
+// capacity-constrained Searchly cluster: the cluster is at its max index count
+// so resource-scoped reads return 0 hits, and the mirror fallback in
+// queryAuditEvents only fires when `mirror.total > ES.total`, so a stale/empty
+// ES result left every getActivityForResource consumer empty on prod. This is
+// the last ES-first resource-scoped reader in the audit-native sweep
+// (#2358 / #2360); mirror-direct matches getPamAuditLogs / getIdentityAuditLogs
+// — reliable + agency-scoped. The mirror already carries resource_type /
+// resource_id columns, so no migration / bull parity is needed. (#1924)
+//
+// agencyId is mandatory and always part of the where-clause (the mirror is NOT
+// a TENANT_MODEL — it is scoped manually). Fail-closed (empty feed) when absent.
 export async function getActivityForResource(
   agencyId: string,
   resourceType: string,
   resourceId: string,
   options: Partial<AuditQueryOptions> = {},
 ): Promise<AuditEvent[]> {
-  const result = await queryAuditEvents({
+  if (!agencyId) return [];
+  const result = await queryAuditEventsFromMirror({
     agencyId,
     resourceType,
     resourceId,
@@ -478,12 +496,21 @@ export async function getActivityForResource(
   return result.data;
 }
 
+// Client-scoped activity feed — powers the KAM client activity feed
+// (lib/kam/activity.ts → getActivityForClient). Same ES-first defect and same
+// mirror-direct fix as getActivityForResource: the mirror now carries the true
+// top-level client_id column (#2360) and queryAuditEventsFromMirror supports the
+// clientId filter, so this is the same clean pattern. (#1924)
+//
+// agencyId is mandatory and always scoped manually (mirror is NOT a
+// TENANT_MODEL). Fail-closed (empty feed) when absent.
 export async function getActivityForClient(
   agencyId: string,
   clientId: string,
   options: Partial<AuditQueryOptions> = {},
 ): Promise<AuditEvent[]> {
-  const result = await queryAuditEvents({
+  if (!agencyId) return [];
+  const result = await queryAuditEventsFromMirror({
     agencyId,
     clientId,
     limit: options.limit || 50,

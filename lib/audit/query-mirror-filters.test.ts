@@ -12,7 +12,7 @@ const { captured, fakePrisma } = vi.hoisted(() => {
 });
 vi.mock('../runtime.js', () => ({ getRuntime: () => ({ prisma: fakePrisma }) }));
 
-import { queryAuditEventsFromMirror } from './query';
+import { queryAuditEventsFromMirror, getActivityForResource, getActivityForClient } from './query';
 
 beforeEach(() => { captured.where = undefined; });
 
@@ -69,6 +69,38 @@ describe('queryAuditEventsFromMirror clientId filter (#2360 dashboard recent-act
   it('omits the clientId filter when absent', async () => {
     await queryAuditEventsFromMirror({ agencyId: 'a1' });
     expect('clientId' in captured.where).toBe(false);
+  });
+});
+
+describe('getActivityForResource reads the mirror DIRECTLY, agency-scoped (#1924)', () => {
+  it('scopes by agency + resourceType + resourceId (Campaign Activity tab path)', async () => {
+    await getActivityForResource('agencyA', 'campaign', 'camp-1');
+    expect(captured.where.agencyId).toBe('agencyA');
+    expect(captured.where.resourceType).toBe('campaign');
+    expect(captured.where.resourceId).toBe('camp-1');
+    // Strictly this resource — no ES-only term leaks, no plugin-family OR-branch.
+    expect('OR' in captured.where).toBe(false);
+  });
+
+  it('fails closed (empty feed, no mirror read) when agencyId is missing', async () => {
+    const out = await getActivityForResource('', 'campaign', 'camp-1');
+    expect(out).toEqual([]);
+    // where was never set → findMany never invoked
+    expect(captured.where).toBeUndefined();
+  });
+});
+
+describe('getActivityForClient reads the mirror DIRECTLY, agency-scoped (#1924)', () => {
+  it('scopes by agency + clientId (KAM client activity feed path)', async () => {
+    await getActivityForClient('agencyA', 'client-9');
+    expect(captured.where.agencyId).toBe('agencyA');
+    expect(captured.where.clientId).toBe('client-9');
+  });
+
+  it('fails closed (empty feed) when agencyId is missing', async () => {
+    const out = await getActivityForClient('', 'client-9');
+    expect(out).toEqual([]);
+    expect(captured.where).toBeUndefined();
   });
 });
 
