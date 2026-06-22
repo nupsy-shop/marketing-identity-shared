@@ -65,6 +65,36 @@ describe('writeProjectionBatch correlation', () => {
     expect(created[0].sessionGrantId).toBeNull();
   });
 
+  it('persists the top-level client.id verbatim, independent of resource demotion (#2360)', async () => {
+    await __writeProjectionBatchForTest([{
+      eventId: 'e4', agencyId: 'a1', timestamp: new Date('2026-06-21T09:00:00Z'),
+      forwardable: {
+        eventType: 'access.request.created', action: 'created', source: 'accesshive',
+        actor: { id: 'op-1', email: 'operator@agency.com' },
+        // client.id is set even though resource is demoted to a request (not the
+        // client) — the new column must still capture the TRUE client id.
+        client: { id: 'client-42', name: 'Acme' },
+        resource: { type: 'access_request', id: 'req-7' },
+        context: { session_grant_id: 'grant-9' },
+      },
+    } as any]);
+    expect(created[0].clientId).toBe('client-42');
+    expect(created[0].resourceType).toBe('access_request');
+    expect(created[0].resourceId).toBe('req-7');
+  });
+
+  it('leaves clientId null when the event has no client', async () => {
+    await __writeProjectionBatchForTest([{
+      eventId: 'e5', agencyId: 'a1', timestamp: new Date('2026-06-21T09:05:00Z'),
+      forwardable: {
+        eventType: 'pam.session.checkout', action: 'checkout', source: 'accesshive',
+        actor: { id: 'op-1', email: 'operator@agency.com' },
+        context: { session_grant_id: 'grant-1' },
+      },
+    } as any]);
+    expect(created[0].clientId).toBeNull();
+  });
+
   it('leaves external system-actor events unattributed (fail-closed)', async () => {
     await __writeProjectionBatchForTest([{
       eventId: 'e3', agencyId: 'a1', timestamp: new Date('2026-06-20T12:00:00Z'),
