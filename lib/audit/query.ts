@@ -280,6 +280,7 @@ export async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Pr
   if (filters.actorEmail) where.actorEmail = filters.actorEmail;
   if (filters.resourceType) where.resourceType = filters.resourceType;
   if (filters.resourceId) where.resourceId = filters.resourceId;
+  if (filters.severity) where.severity = filters.severity;
   if (filters.identityId) where.identityId = filters.identityId;
   if (filters.sessionGrantId) where.sessionGrantId = filters.sessionGrantId;
   if (filters.occurredFrom || filters.occurredTo) {
