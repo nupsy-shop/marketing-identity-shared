@@ -70,7 +70,9 @@ export interface AuditQueryOptions {
   sessionGrantId?: string | null;
   occurredFrom?: Date | string | null;
   occurredTo?: Date | string | null;
-  clientId?: string | null;
+  /** Filter by client. A single id or a set of ids (mirror reader compiles a
+   *  set to `where.clientId = { in: [...] }`; ES compiles to a terms query). */
+  clientId?: string | string[] | null;
   from?: string | Date | null;
   to?: string | Date | null;
   dateFrom?: string | Date | null;
@@ -151,7 +153,13 @@ function buildQuery(filters: AuditQueryOptions): EsQuery {
   }
   if (filters.resourceType) must.push({ term: { 'resource.type': filters.resourceType } });
   if (filters.resourceId) must.push({ term: { 'resource.id': filters.resourceId } });
-  if (filters.clientId) must.push({ term: { 'client.id': filters.clientId } });
+  if (filters.clientId) {
+    must.push(
+      Array.isArray(filters.clientId)
+        ? { terms: { 'client.id': filters.clientId } }
+        : { term: { 'client.id': filters.clientId } },
+    );
+  }
 
   const dateFrom = filters.dateFrom || filters.from;
   const dateTo = filters.dateTo || filters.to;
@@ -283,6 +291,11 @@ export async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Pr
   if (filters.severity) where.severity = filters.severity;
   if (filters.identityId) where.identityId = filters.identityId;
   if (filters.sessionGrantId) where.sessionGrantId = filters.sessionGrantId;
+  if (filters.clientId) {
+    where.clientId = Array.isArray(filters.clientId)
+      ? { in: filters.clientId }
+      : filters.clientId;
+  }
   if (filters.occurredFrom || filters.occurredTo) {
     const occurredAt: Record<string, Date> = {};
     if (filters.occurredFrom) occurredAt.gte = new Date(filters.occurredFrom as string);
@@ -327,6 +340,7 @@ export async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Pr
         resourceType: true,
         identityId: true,
         sessionGrantId: true,
+        clientId: true,
         occurredAt: true,
         attribution: true,
         payload: true,
@@ -360,6 +374,7 @@ export async function queryAuditEventsFromMirror(filters: AuditQueryOptions): Pr
       context: (payload.context ?? {}) as Record<string, unknown>,
       identityId: row.identityId ?? null,
       sessionGrantId: row.sessionGrantId ?? null,
+      client: row.clientId ? { id: row.clientId } : (payload.client as Record<string, unknown> | undefined),
       occurredAt: row.occurredAt instanceof Date ? row.occurredAt.toISOString() : (row.occurredAt ?? null),
       attribution: row.attribution ?? null,
       ...payload,

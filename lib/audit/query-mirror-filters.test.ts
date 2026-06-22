@@ -53,6 +53,25 @@ describe('queryAuditEventsFromMirror severity filter', () => {
   });
 });
 
+describe('queryAuditEventsFromMirror clientId filter (#2360 dashboard recent-activity)', () => {
+  it('compiles a single clientId to an equality filter', async () => {
+    await queryAuditEventsFromMirror({ agencyId: 'a1', clientId: 'client-1' });
+    expect(captured.where.agencyId).toBe('a1');
+    expect(captured.where.clientId).toBe('client-1');
+  });
+
+  it('compiles a clientId ARRAY to an `in` filter (no undercount across the set)', async () => {
+    await queryAuditEventsFromMirror({ agencyId: 'a1', clientId: ['c1', 'c2', 'c3'] });
+    expect(captured.where.agencyId).toBe('a1');
+    expect(captured.where.clientId).toEqual({ in: ['c1', 'c2', 'c3'] });
+  });
+
+  it('omits the clientId filter when absent', async () => {
+    await queryAuditEventsFromMirror({ agencyId: 'a1' });
+    expect('clientId' in captured.where).toBe(false);
+  });
+});
+
 describe('queryAuditEventsFromMirror source-scoped feed (identity source activity)', () => {
   it('scopes strictly by agency + resourceType + resourceId (cross-tenant safe)', async () => {
     await queryAuditEventsFromMirror({

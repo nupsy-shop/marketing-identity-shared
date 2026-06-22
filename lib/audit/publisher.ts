@@ -357,6 +357,12 @@ async function writeProjectionBatch(events: PreparedEvent[]): Promise<void> {
       // ── correlation index ──
       identityId,
       sessionGrantId,
+      // Persist the event's top-level client.id verbatim (set on the forwardable
+      // in buildForwardable when details.clientId is present). This is the TRUE
+      // client id, independent of the resource-demotion logic — so the dashboard
+      // mirror reader matches the same set as the ES `client.id` term, with no
+      // resourceType='client' undercount. (#2360)
+      clientId: f.client?.id ?? null,
       occurredAt: deriveOccurredAt(ctx, e.timestamp),
       attribution: deriveAttribution(sessionGrantId, identityId),
     };
