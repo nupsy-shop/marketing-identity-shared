@@ -21,6 +21,8 @@ interface EnsureArgs {
     user: { realm?: string; email?: string; firstName?: string; lastName?: string },
     agencyId?: string,
   ) => Promise<KeycloakUserLike>;
+  /** Optional: called with the resolved KC user ID after creation/lookup to add them to a group. */
+  addToSyntheticGroup?: (userId: string) => Promise<void>;
   realm: string;
   agencyId: string;
   identityId: string;
@@ -42,6 +44,7 @@ export async function ensureSyntheticKcUser(args: EnsureArgs): Promise<{ keycloa
       where: { id: identityId },
       data: { identifier: primaryEmail, updatedAt: new Date() },
     });
+    await args.addToSyntheticGroup?.(args.existingKeycloakUserId);
     return { keycloakUserId: args.existingKeycloakUserId };
   }
 
@@ -55,5 +58,6 @@ export async function ensureSyntheticKcUser(args: EnsureArgs): Promise<{ keycloa
     data: { keycloak_user_id: kcUser.id, identifier: primaryEmail, updatedAt: new Date() },
   });
 
+  await args.addToSyntheticGroup?.(kcUser.id);
   return { keycloakUserId: kcUser.id };
 }

@@ -291,6 +291,27 @@ export async function tagSyntheticIdentity(userId: string, tag: string, realm = 
   await mergeUserAttributes(userId, { synthetic_identity_tag: [tag] }, realm, agencyId);
 }
 
+/**
+ * Add a Keycloak user to a realm group by group NAME (e.g. 'PamSyntheticIdentities').
+ * Idempotent — Keycloak's PUT membership is a no-op if already a member.
+ */
+export async function addKeycloakUserToGroup(
+  realm: string,
+  userId: string,
+  groupName: string,
+  agencyId?: string,
+): Promise<void> {
+  const search = await adminFetch(realm, `/groups?search=${encodeURIComponent(groupName)}&exact=true`, undefined, agencyId);
+  if (!search.ok) throw new Error(`Failed to look up group "${groupName}" (${search.status})`);
+  const groups: Array<{ id: string; name: string }> = await search.json();
+  const group = groups.find((g) => g.name === groupName);
+  if (!group) throw new Error(`Keycloak group "${groupName}" not found in realm ${realm}`);
+  const res = await adminFetch(realm, `/users/${userId}/groups/${group.id}`, { method: 'PUT' }, agencyId);
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Failed to add user ${userId} to group "${groupName}" (${res.status})`);
+  }
+}
+
 // ─── User enable / disable / delete ───────────────────────────────────────
 
 /**

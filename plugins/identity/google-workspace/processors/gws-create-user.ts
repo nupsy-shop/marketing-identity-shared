@@ -235,13 +235,14 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     // assuming session (#2312) can impersonate it into the delegated-OU Google
     // SAML login. The realm's Google SAML client already maps NameID = email.
     try {
-      const { createKeycloakUser } = await import('../../../../lib/keycloakAdmin.js');
+      const { createKeycloakUser, addKeycloakUserToGroup } = await import('../../../../lib/keycloakAdmin.js');
       const kcSettings = await prisma.agency_settings.findUnique({ where: { agency_id: tenantId } });
       const kcRealm = kcSettings?.keycloak_realm || tenantId;
       const [givenName, ...rest] = (resolvedDisplayName || resolvedEmail).split(' ');
       await ensureSyntheticKcUser({
         prisma,
         createKeycloakUser,
+        addToSyntheticGroup: (uid: string) => addKeycloakUserToGroup(kcRealm, uid, 'PamSyntheticIdentities', tenantId),
         realm: kcRealm,
         agencyId: tenantId,
         identityId,
