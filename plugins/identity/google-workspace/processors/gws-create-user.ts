@@ -15,6 +15,7 @@ import { getRuntime } from '../../../../lib/runtime.js';
 import { ProviderStatus } from '../../../../lib/provisioning-types.js';
 import { publishAuditEvent } from '../../../../lib/audit/publisher.js';
 import { validateScopesForMode } from '../tokens.js';
+import { ensureSyntheticKcUser } from './ensure-synthetic-kc-user.js';
 
 interface JobResult {
   status: 'completed';
@@ -229,6 +230,38 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     logger.info('gws_create_user: user provisioned in Google Workspace', {
       jobId: String(job.id), identityId, userId: result.userId, created: String(result.created),
     });
+
+    // 6b. Ensure a Keycloak user for this synthetic identity so a later identity-
+    // assuming session (#2312) can impersonate it into the delegated-OU Google
+    // SAML login. The realm's Google SAML client already maps NameID = email.
+    try {
+      const { createKeycloakUser, addKeycloakUserToGroup } = await import('../../../../lib/keycloakAdmin.js');
+      const kcSettings = await prisma.agency_settings.findUnique({ where: { agency_id: tenantId } });
+      const kcRealm = kcSettings?.keycloak_realm || tenantId;
+      const [givenName, ...rest] = (resolvedDisplayName || resolvedEmail).split(' ');
+      await ensureSyntheticKcUser({
+        prisma,
+        createKeycloakUser,
+        addToSyntheticGroup: (uid: string) => addKeycloakUserToGroup(kcRealm, uid, 'PamSyntheticIdentities', tenantId),
+        realm: kcRealm,
+        agencyId: tenantId,
+        identityId,
+        primaryEmail: result.primaryEmail || resolvedEmail,
+        givenName: givenName || 'PAM',
+        familyName: rest.join(' ') || 'Identity',
+        existingKeycloakUserId: identity.keycloak_user_id ?? null,
+      });
+      // Refresh the local copy so the readiness sync below sees the new id.
+      identity.keycloak_user_id =
+        identity.keycloak_user_id ??
+        (await prisma.integration_identities.findUnique({
+          where: { id: identityId }, select: { keycloak_user_id: true },
+        }))?.keycloak_user_id ?? null;
+    } catch (kcUserErr) {
+      logger.warn('gws_create_user: ensureSyntheticKcUser failed (non-fatal)', {
+        identityId, error: kcUserErr instanceof Error ? kcUserErr.message : String(kcUserErr),
+      });
+    }
 
     // Emit canonical audit event for dedicated identity provisioned via GWS.
     // Fire-and-forget: a publisher hiccup must not fail the job.
