@@ -8,7 +8,7 @@ function makePrisma() {
 }
 
 describe('ensureSyntheticKcUser', () => {
-  it('creates a KC user (realm+email+name) and persists keycloak_user_id + identifier', async () => {
+  it('creates a KC user (realm+username+email+name) and persists keycloak_user_id + identifier', async () => {
     const prisma = makePrisma();
     const createKeycloakUser = vi.fn().mockResolvedValue({ id: 'kc-9', email: 'syn@trevox.agency' });
     const addToSyntheticGroup = vi.fn().mockResolvedValue(undefined);
@@ -26,7 +26,9 @@ describe('ensureSyntheticKcUser', () => {
     });
 
     expect(createKeycloakUser).toHaveBeenCalledWith(
-      { realm: 'agency-trevox', email: 'syn@trevox.agency', firstName: 'PAM', lastName: 'Synthetic' },
+      // username MUST be set — the agency realm requires it (creating without one
+      // 400s "User name is missing"); the synthetic's email is its username.
+      { realm: 'agency-trevox', username: 'syn@trevox.agency', email: 'syn@trevox.agency', firstName: 'PAM', lastName: 'Synthetic' },
       'ag-1',
     );
     expect(prisma.integration_identities.update).toHaveBeenCalledWith({
