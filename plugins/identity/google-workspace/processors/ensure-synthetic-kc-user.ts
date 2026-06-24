@@ -18,7 +18,7 @@ interface EnsureArgs {
     };
   };
   createKeycloakUser: (
-    user: { realm?: string; email?: string; firstName?: string; lastName?: string },
+    user: { realm?: string; username?: string; email?: string; firstName?: string; lastName?: string },
     agencyId?: string,
   ) => Promise<KeycloakUserLike>;
   /** Optional: called with the resolved KC user ID after creation/lookup to add them to a group. */
@@ -49,7 +49,11 @@ export async function ensureSyntheticKcUser(args: EnsureArgs): Promise<{ keycloa
   }
 
   const kcUser = await createKeycloakUser(
-    { realm, email: primaryEmail, firstName: givenName, lastName: familyName },
+    // username is REQUIRED by the agency realm (createKeycloakUser passes the
+    // payload straight to KC's POST /users, which 400s "User name is missing"
+    // without it). The synthetic's email is its username — consistent with the
+    // identifier==primaryEmail invariant and the realm's NameID=email mapping.
+    { realm, username: primaryEmail, email: primaryEmail, firstName: givenName, lastName: familyName },
     agencyId,
   );
 
