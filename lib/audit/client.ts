@@ -41,6 +41,70 @@ export interface AuditDocument {
   [key: string]: unknown;
 }
 
+// ─── Context Sanitization (ES dynamic-mapping conflict guard) ─────────────────
+
+/**
+ * `context` is a free-form, per-`eventType` payload. Different events put
+ * different *types* at the same path — e.g. `context.skipped` is a scalar (`0`)
+ * in `jml_process_lifecycle` / `maintain_drift_remediations` but an object in
+ * other events. Elasticsearch dynamically maps each `context.<field>` path on
+ * first sight and then rejects any later document whose path carries a
+ * different type:
+ *
+ *   mapper_parsing_exception: object mapping for [context.skipped] tried to
+ *   parse field [skipped] as object, but found a concrete value
+ *
+ * which fails the whole `audit_index_es` job — Bull retries forever and ES
+ * never catches up (observed in prod 2026-06-09).
+ *
+ * Reindexing the already-poisoned monthly index is impossible in place (you
+ * cannot change a field's type) and risky on the index-count-capped Searchly
+ * plan (see docs/architecture/audit-postgres-mirror.md — dropping/recreating
+ * could fail to recreate). So instead we never send a *structured* `context`
+ * to ES at all: the whole blob is serialised into a single scalar `contextJson`
+ * string, which can never type-flip regardless of what any event puts inside
+ * `context`. Readers call `rehydrateContext` to restore the original shape, so
+ * `_source` consumers are unaffected. Postgres (`AuditEvent` +
+ * `audit_events_mirror`) remains the source of truth; ES is only a search
+ * mirror, and `_source` already diverges from the canonical MinIO body (the
+ * indexer adds seq/prevHash/etc.), so this reshaping does not affect the hash
+ * chain (integrity is verified via `bodySha256` over the MinIO body).
+ */
+export function sanitizeContextForEs<T extends Record<string, unknown>>(doc: T): T {
+  if (!doc || typeof doc !== 'object' || !('context' in doc)) return doc;
+  const { context, ...rest } = doc as Record<string, unknown>;
+  // null/undefined context carries no nested paths — just drop it.
+  if (context === null || context === undefined) {
+    return rest as T;
+  }
+  return { ...rest, contextJson: JSON.stringify(context) } as unknown as T;
+}
+
+/**
+ * Inverse of {@link sanitizeContextForEs} for the ES read path. If a `_source`
+ * carries the serialised `contextJson` field, parse it back into `context` so
+ * downstream consumers see the original structured shape. Tolerates:
+ *   - legacy docs that still carry a structured `context` (pre-fix indices),
+ *   - malformed JSON (falls back to an empty object rather than throwing).
+ */
+export function rehydrateContext<T extends Record<string, unknown>>(source: T): T {
+  if (!source || typeof source !== 'object') return source;
+  if (typeof (source as Record<string, unknown>).contextJson !== 'string') return source;
+  const { contextJson, ...rest } = source as Record<string, unknown>;
+  // A structured context shouldn't co-exist with contextJson, but if a legacy
+  // doc somehow has both, prefer the structured one and just drop contextJson.
+  if ('context' in rest && rest.context !== undefined) {
+    return rest as T;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contextJson as string);
+  } catch {
+    parsed = {};
+  }
+  return { ...rest, context: parsed } as unknown as T;
+}
+
 // ─── Connection Parsing ──────────────────────────────────────────────────────
 
 let _esBase: string | null = null;
@@ -132,24 +196,25 @@ const INDEX_TEMPLATE = {
       'resource.type': { type: 'keyword' },
       'resource.id':   { type: 'keyword' },
       'resource.name': { type: 'text', fields: { keyword: { type: 'keyword' } } },
-      // `context` is a free-form payload whose shape varies per
-      // `eventType` (drift_maintenance_completed has `skipped: number`,
-      // remediation.skipped has `skipped: <missing>`, gateway events
-      // have nested objects, etc.). With dynamic mapping enabled and no
-      // declared sub-properties, ES auto-infers a type for each path on
-      // first sight and rejects subsequent docs whose path has a
-      // different type — see prod failures of
+      // `context` is a free-form payload whose shape varies per `eventType`
+      // (`context.skipped` is a scalar in jml_process_lifecycle but an object
+      // elsewhere, gateway events nest objects, etc.). With dynamic mapping ES
+      // auto-infers a type for each `context.<field>` path on first sight and
+      // rejects subsequent docs whose path has a different type — see prod
+      // failures of
       //   "object mapping for [context.skipped] tried to parse field
-      //    [skipped] as object, but found a concrete value"
-      // We don't query / aggregate on `context.<field>` at the index
-      // level — readers always rely on `_source` — so `enabled: false`
-      // is the right setting: keep the payload in `_source`, skip
-      // indexing of its sub-fields, no dynamic-type conflicts ever.
-      // Applies to NEW indices only (templates only fire at index
-      // creation); existing monthly indices keep their inferred mapping
-      // until the next rollover. To force-heal a current index, drop +
-      // recreate it (operational, not in this code change).
+      //    [skipped] as object, but found a concrete value".
+      //
+      // The indexer no longer sends a *structured* `context` at all: it is
+      // serialised to a single scalar `contextJson` string before indexing
+      // (see sanitizeContextForEs) and rehydrated on read (rehydrateContext in
+      // query.ts). `contextJson` is one `text` field that can never type-flip,
+      // and it stays searchable (the `search` filter targets it). We keep the
+      // legacy `context` object mapping disabled so that any straggler docs
+      // carrying a structured `context` (e.g. on a pre-fix monthly index) are
+      // still stored in `_source` without dynamic sub-field mapping.
       context: { type: 'object', enabled: false },
+      contextJson: { type: 'text', fields: { keyword: { type: 'keyword', ignore_above: 8191 } } },
       eventHash: { type: 'keyword' },
       prevHash:  { type: 'keyword' },
       retentionDays: { type: 'integer' },
@@ -203,10 +268,13 @@ export async function indexDocument(
   // in the correct rollover bucket and don't appear as chain breaks
   // the next time anyone queries that range.
   const idx = doc.timestamp ? indexNameForDate(doc.timestamp) : currentIndexName();
+  // Serialise `context` → `contextJson` so ES never sees a type-flipping
+  // `context.<field>` path (see sanitizeContextForEs).
+  const safeDoc = sanitizeContextForEs(doc as unknown as Record<string, unknown>);
   const refreshQs = opts?.refresh ? `?refresh=${opts.refresh}` : '';
   const res = await esFetch(`/${idx}/_doc/${doc.eventId}${refreshQs}`, {
     method: 'PUT',
-    body: JSON.stringify(doc),
+    body: JSON.stringify(safeDoc),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -221,8 +289,9 @@ export async function bulkIndex(docs: AuditDocument[]): Promise<{ errors: boolea
   const lines: string[] = [];
   for (const doc of docs) {
     const idx = indexNameForDate(doc.timestamp);
+    const safeDoc = sanitizeContextForEs(doc as unknown as Record<string, unknown>);
     lines.push(JSON.stringify({ index: { _index: idx, _id: doc.eventId } }));
-    lines.push(JSON.stringify(doc));
+    lines.push(JSON.stringify(safeDoc));
   }
   const body = lines.join('\n') + '\n';
 
