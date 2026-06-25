@@ -320,16 +320,36 @@ export async function bulkIndex(docs: AuditDocument[]): Promise<{ errors: boolea
   }
   const body = lines.join('\n') + '\n';
 
-  const res = await esFetch('/_bulk', {
-    method: 'POST',
-    body,
-  });
-
+  let res = await esFetch('/_bulk', { method: 'POST', body });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`ES bulk failed (${res.status}): ${text}`);
   }
-  return res.json();
+  let json = (await res.json()) as { errors?: boolean; items?: Array<{ index?: { _index?: string; error?: { type?: string } } }> };
+
+  // A _bulk call returns HTTP 200 even when individual items fail. Detect items
+  // whose target index does not exist, create those indices (+ template), then
+  // retry the whole bulk once. Re-indexing already-succeeded items is idempotent
+  // (the `index` op upserts by _id), so a single full retry is safe.
+  const missing = [
+    ...new Set(
+      (json.items ?? [])
+        .filter((it) => it.index?.error?.type === 'index_not_found_exception')
+        .map((it) => it.index?._index)
+        .filter((name): name is string => Boolean(name)),
+    ),
+  ];
+  if (missing.length > 0) {
+    await ensureIndexTemplate();
+    for (const idx of missing) await ensureIndexExists(idx);
+    res = await esFetch('/_bulk', { method: 'POST', body });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`ES bulk failed (${res.status}): ${text}`);
+    }
+    json = (await res.json()) as typeof json;
+  }
+  return json as { errors: boolean; items: Array<Record<string, unknown>> };
 }
 
 // ─── E2E ES Override Helper ──────────────────────────────────────────────────

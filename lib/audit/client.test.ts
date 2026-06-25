@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isIndexNotFound, ensureIndexExists, indexDocument } from './client.js';
+import { isIndexNotFound, ensureIndexExists, indexDocument, bulkIndex } from './client.js';
 
 function mockRes(status: number, body: unknown): Response {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -81,5 +81,28 @@ describe('indexDocument self-heal', () => {
     fetchMock.mockResolvedValueOnce(mockRes(400, { error: { type: 'mapper_parsing_exception' } }));
     await expect(indexDocument(doc)).rejects.toThrow(/ES index failed \(400\)/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('bulkIndex self-heal', () => {
+  const docs = [{ eventId: 'a', timestamp: '2026-07-02T00:00:00.000Z' }] as never[];
+
+  it('returns the response when no item hit a missing index (single call)', async () => {
+    fetchMock.mockResolvedValueOnce(mockRes(200, { errors: false, items: [{ index: { _index: 'audit-2026.07', status: 201 } }] }));
+    const out = await bulkIndex(docs);
+    expect(out.errors).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('on an item index_not_found: ensures the missing index, then retries the bulk once', async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockRes(200, { errors: true, items: [{ index: { _index: 'audit-2026.07', status: 404, error: { type: 'index_not_found_exception' } } }] })) // 1: bulk
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))   // 2: PUT template
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))   // 3: PUT index
+      .mockResolvedValueOnce(mockRes(200, { errors: false, items: [{ index: { _index: 'audit-2026.07', status: 201 } }] })); // 4: bulk retry
+    const out = await bulkIndex(docs);
+    expect(out.errors).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === 'http://es.test/audit-2026.07')).toBe(true);
   });
 });
