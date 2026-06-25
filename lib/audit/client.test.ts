@@ -105,4 +105,23 @@ describe('bulkIndex self-heal', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls.some(([url]) => String(url) === 'http://es.test/audit-2026.07')).toBe(true);
   });
+
+  it('mixed batch: only the missing index is created, then the whole bulk is retried once', async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockRes(200, { errors: true, items: [
+        { index: { _index: 'audit-2026.06', status: 201 } },                                                  // already succeeded
+        { index: { _index: 'audit-2026.07', status: 404, error: { type: 'index_not_found_exception' } } },     // missing
+      ] }))
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))   // PUT template
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))   // PUT audit-2026.07
+      .mockResolvedValueOnce(mockRes(200, { errors: false, items: [
+        { index: { _index: 'audit-2026.06', status: 200 } },  // re-sent, idempotent upsert
+        { index: { _index: 'audit-2026.07', status: 201 } },
+      ] }));
+    const out = await bulkIndex(docs);
+    expect(out.errors).toBe(false);
+    // Only the missing index is created (the already-succeeded one is not re-created).
+    const indexPuts = fetchMock.mock.calls.filter(([url, opts]) => (opts as { method?: string })?.method === 'PUT' && /\/audit-\d{4}\.\d{2}$/.test(String(url)));
+    expect(indexPuts.map(([url]) => String(url))).toEqual(['http://es.test/audit-2026.07']);
+  });
 });
