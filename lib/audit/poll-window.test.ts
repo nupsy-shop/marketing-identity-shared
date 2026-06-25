@@ -4,7 +4,7 @@ import {
   eventDedupKey,
   shouldPublishEvent,
   loadSeenEventKeys,
-} from './poll-window';
+} from './poll-window.js';
 
 const now = new Date('2026-06-25T12:00:00.000Z');
 
