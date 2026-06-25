@@ -239,22 +239,34 @@ export async function ensureIndexTemplate(): Promise<void> {
   }
 }
 
-export async function ensureCurrentIndex(): Promise<void> {
-  const idx = currentIndexName();
+/** True only for a 404 whose body is an Elasticsearch index_not_found_exception. */
+export function isIndexNotFound(status: number, bodyText: string): boolean {
+  return status === 404 && bodyText.includes('index_not_found_exception');
+}
+
+/**
+ * Idempotently create `indexName`. Treats an already-existing index as success
+ * (concurrent indexers racing to create the same monthly index). Best-effort:
+ * any other failure is logged and swallowed — the caller's retry will re-surface
+ * a genuine problem as another 404 and re-queue the job.
+ */
+export async function ensureIndexExists(indexName: string): Promise<void> {
   try {
-    const head = await esFetch(`/${idx}`, { method: 'HEAD' });
-    if (head.status === 404) {
-      const create = await esFetch(`/${idx}`, { method: 'PUT' });
-      if (!create.ok) {
-        const text = await create.text();
-        console.error('[Audit ES] Failed to create index', idx, ':', text);
-      } else {
-        console.log('[Audit ES] Created index:', idx);
-      }
+    const res = await esFetch(`/${indexName}`, { method: 'PUT' });
+    if (res.ok) {
+      console.log('[Audit ES] Created index:', indexName);
+      return;
     }
+    const text = await res.text();
+    if (text.includes('resource_already_exists_exception')) return; // already there — fine
+    console.error('[Audit ES] Failed to create index', indexName, ':', text);
   } catch (err: unknown) {
-    console.error('[Audit ES] Index check error:', (err as Error).message);
+    console.error('[Audit ES] Index create error:', (err as Error).message);
   }
+}
+
+export async function ensureCurrentIndex(): Promise<void> {
+  await ensureIndexExists(currentIndexName());
 }
 
 // ─── Document Operations ─────────────────────────────────────────────────────
