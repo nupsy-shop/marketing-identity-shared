@@ -13,6 +13,12 @@
 import type Bull from 'bull';
 import { getRuntime } from '../../../../lib/runtime.js';
 import { publishAuditEvent, flushAll } from '../../../../lib/audit/publisher.js';
+import {
+  computePollSince,
+  loadSeenEventKeys,
+  shouldPublishEvent,
+  eventDedupKey,
+} from '../../../../lib/audit/poll-window.js';
 
 interface JobResult {
   status: 'completed' | 'skipped';
@@ -158,15 +164,34 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
   }
 
   // 5. Determine poll window
-  const since = config.lastAuditPollAt
-    ? new Date(config.lastAuditPollAt as string)
-    : new Date(Date.now() - 24 * 60 * 60 * 1000);
+  // Pre-run cursor — used to gate keyless events in the lookback overlap.
+  const previousCursor =
+    typeof config.lastAuditPollAt === 'string' ? config.lastAuditPollAt : null;
+  const previousCursorMs = previousCursor ? new Date(previousCursor).getTime() : null;
+  // Lookback overlap so events Google surfaces late aren't permanently skipped.
+  const since = computePollSince(config.lastAuditPollAt as string | undefined);
 
   const agency = await prisma.agencies.findUnique({
     where: { id: tenantId },
     select: { slug: true },
   });
   const agencySlug = agency?.slug || '';
+
+  // Events already ingested in [since, now] — so the lookback overlap re-fetches
+  // but never re-publishes. Non-fatal: on failure we degrade to no-dedup (the
+  // chain + mirror remain the source of truth) rather than crash the poll.
+  const seen = await loadSeenEventKeys({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    prisma: prisma as any,
+    agencyId: tenantId,
+    since,
+    eventTypePrefix: 'platform.gws.',
+  }).catch((err: unknown) => {
+    logger.warn('gws_poll_audit: dedup seen-set load failed (continuing without dedup)', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return new Set<string>();
+  });
 
   // 6. Poll Google Admin Reports API
   let totalEvents = 0;
@@ -196,6 +221,18 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
           const mapKey = `${app}.${event.name}`;
           const mapped = EVENT_MAP[mapKey] || { type: `platform.gws.${app}.${event.name}`, severity: 'info' };
 
+          // Dedup the lookback overlap (key = Google uniqueQualifier, persisted
+          // as resource.id). Keyless events are gated on previousCursor instead.
+          const key = eventDedupKey(item.id?.uniqueQualifier);
+          const eventTimeMs = item.id?.time ? new Date(item.id.time).getTime() : null;
+          if (!shouldPublishEvent({ key, eventTimeMs, seen, previousCursorMs })) {
+            continue;
+          }
+
+          // NOTE: identity correlation (mirror.identityId) is resolved downstream
+          // from actor.email against the CURRENT integration_identities. A late
+          // event whose synthetic identity was offboarded between eventTime and
+          // ingestion will not correlate — a documented limitation (#2312 spec).
           await publishAuditEvent({
             eventType: mapped.type,
             source: 'google-workspace',
@@ -216,10 +253,15 @@ export default async function gwsPollAudit(job: Bull.Job): Promise<JobResult> {
               applicationName: item.id?.applicationName,
               parameters: event.parameters,
               platformId: source.id,
+              // Real Google event time → mirror.occurredAt (deriveOccurredAt reads
+              // context.eventTime). Without this, late-ingested events are stamped
+              // at ingestion time and fall outside their true session window.
+              eventTime: item.id?.time,
             },
             timestamp: item.id?.time ? new Date(item.id.time) : new Date(),
           });
           totalEvents++;
+          if (key) seen.add(key);
         }
       }
 
