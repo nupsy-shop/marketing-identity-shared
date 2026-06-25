@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isIndexNotFound, ensureIndexExists } from './client.js';
+import { isIndexNotFound, ensureIndexExists, indexDocument } from './client.js';
 
 function mockRes(status: number, body: unknown): Response {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -43,5 +43,43 @@ describe('ensureIndexExists', () => {
   it('swallows other creation errors (best-effort, no throw)', async () => {
     fetchMock.mockResolvedValueOnce(mockRes(500, 'boom'));
     await expect(ensureIndexExists('audit-2026.07')).resolves.toBeUndefined();
+  });
+});
+
+describe('indexDocument self-heal', () => {
+  const doc = { eventId: 'ev1', timestamp: '2026-07-02T00:00:00.000Z', eventType: 'x' } as never;
+
+  it('happy path indexes once with no ensure calls', async () => {
+    fetchMock.mockResolvedValueOnce(mockRes(201, { result: 'created' }));
+    const out = await indexDocument(doc);
+    expect(out).toEqual({ result: 'created' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('on index_not_found: ensures template + index, then retries to success', async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockRes(404, { error: { type: 'index_not_found_exception' } })) // 1: PUT doc
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))                            // 2: PUT template
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))                            // 3: PUT index
+      .mockResolvedValueOnce(mockRes(201, { result: 'created' }));                            // 4: PUT doc retry
+    const out = await indexDocument(doc);
+    expect(out).toEqual({ result: 'created' });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/audit-2026.07') && !String(url).includes('_doc'))).toBe(true);
+  });
+
+  it('throws if the retry still 404s', async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockRes(404, { error: { type: 'index_not_found_exception' } }))
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))
+      .mockResolvedValueOnce(mockRes(200, { acknowledged: true }))
+      .mockResolvedValueOnce(mockRes(404, { error: { type: 'index_not_found_exception' } }));
+    await expect(indexDocument(doc)).rejects.toThrow(/ES index failed \(404\)/);
+  });
+
+  it('throws immediately on a non-index-not-found error, no ensure', async () => {
+    fetchMock.mockResolvedValueOnce(mockRes(400, { error: { type: 'mapper_parsing_exception' } }));
+    await expect(indexDocument(doc)).rejects.toThrow(/ES index failed \(400\)/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

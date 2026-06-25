@@ -284,12 +284,25 @@ export async function indexDocument(
   // `context.<field>` path (see sanitizeContextForEs).
   const safeDoc = sanitizeContextForEs(doc as unknown as Record<string, unknown>);
   const refreshQs = opts?.refresh ? `?refresh=${opts.refresh}` : '';
-  const res = await esFetch(`/${idx}/_doc/${doc.eventId}${refreshQs}`, {
-    method: 'PUT',
-    body: JSON.stringify(safeDoc),
-  });
+  const path = `/${idx}/_doc/${doc.eventId}${refreshQs}`;
+  const body = JSON.stringify(safeDoc);
+
+  let res = await esFetch(path, { method: 'PUT', body });
   if (!res.ok) {
     const text = await res.text();
+    if (isIndexNotFound(res.status, text)) {
+      // The monthly index does not exist (deletion, month rollover, or a
+      // backdated event). Self-heal: ensure the template + the doc's own index,
+      // then retry the write exactly once.
+      await ensureIndexTemplate();
+      await ensureIndexExists(idx);
+      res = await esFetch(path, { method: 'PUT', body });
+      if (!res.ok) {
+        const retryText = await res.text();
+        throw new Error(`ES index failed (${res.status}): ${retryText}`);
+      }
+      return res.json();
+    }
     throw new Error(`ES index failed (${res.status}): ${text}`);
   }
   return res.json();
