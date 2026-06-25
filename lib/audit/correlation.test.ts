@@ -40,6 +40,11 @@ describe('deriveOccurredAt', () => {
     expect(deriveOccurredAt({ eventTime: 'not-a-date' }, captured).toISOString())
       .toBe(captured.toISOString());
   });
+  it('prefers context.eventTime (the real provider event time) over capturedAt', () => {
+    const captured = new Date('2026-06-25T02:20:00.000Z'); // ingestion time
+    const eventTime = '2026-06-24T18:10:01.081Z';          // real Google event time
+    expect(deriveOccurredAt({ eventTime }, captured).toISOString()).toBe('2026-06-24T18:10:01.081Z');
+  });
 });
 
 describe('deriveAttribution', () => {
