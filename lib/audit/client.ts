@@ -239,22 +239,34 @@ export async function ensureIndexTemplate(): Promise<void> {
   }
 }
 
-export async function ensureCurrentIndex(): Promise<void> {
-  const idx = currentIndexName();
+/** True only for a 404 whose body is an Elasticsearch index_not_found_exception. */
+export function isIndexNotFound(status: number, bodyText: string): boolean {
+  return status === 404 && bodyText.includes('index_not_found_exception');
+}
+
+/**
+ * Idempotently create `indexName`. Treats an already-existing index as success
+ * (concurrent indexers racing to create the same monthly index). Best-effort:
+ * any other failure is logged and swallowed — the caller's retry will re-surface
+ * a genuine problem as another 404 and re-queue the job.
+ */
+export async function ensureIndexExists(indexName: string): Promise<void> {
   try {
-    const head = await esFetch(`/${idx}`, { method: 'HEAD' });
-    if (head.status === 404) {
-      const create = await esFetch(`/${idx}`, { method: 'PUT' });
-      if (!create.ok) {
-        const text = await create.text();
-        console.error('[Audit ES] Failed to create index', idx, ':', text);
-      } else {
-        console.log('[Audit ES] Created index:', idx);
-      }
+    const res = await esFetch(`/${indexName}`, { method: 'PUT' });
+    if (res.ok) {
+      console.log('[Audit ES] Created index:', indexName);
+      return;
     }
+    const text = await res.text();
+    if (text.includes('resource_already_exists_exception')) return; // already there — fine
+    console.error('[Audit ES] Failed to create index', indexName, ':', text);
   } catch (err: unknown) {
-    console.error('[Audit ES] Index check error:', (err as Error).message);
+    console.error('[Audit ES] Index create error:', (err as Error).message);
   }
+}
+
+export async function ensureCurrentIndex(): Promise<void> {
+  await ensureIndexExists(currentIndexName());
 }
 
 // ─── Document Operations ─────────────────────────────────────────────────────
@@ -272,12 +284,25 @@ export async function indexDocument(
   // `context.<field>` path (see sanitizeContextForEs).
   const safeDoc = sanitizeContextForEs(doc as unknown as Record<string, unknown>);
   const refreshQs = opts?.refresh ? `?refresh=${opts.refresh}` : '';
-  const res = await esFetch(`/${idx}/_doc/${doc.eventId}${refreshQs}`, {
-    method: 'PUT',
-    body: JSON.stringify(safeDoc),
-  });
+  const path = `/${idx}/_doc/${doc.eventId}${refreshQs}`;
+  const body = JSON.stringify(safeDoc);
+
+  let res = await esFetch(path, { method: 'PUT', body });
   if (!res.ok) {
     const text = await res.text();
+    if (isIndexNotFound(res.status, text)) {
+      // The monthly index does not exist (deletion, month rollover, or a
+      // backdated event). Self-heal: ensure the template + the doc's own index,
+      // then retry the write exactly once.
+      await ensureIndexTemplate();
+      await ensureIndexExists(idx);
+      res = await esFetch(path, { method: 'PUT', body });
+      if (!res.ok) {
+        const retryText = await res.text();
+        throw new Error(`ES index failed (${res.status}): ${retryText}`);
+      }
+      return res.json();
+    }
     throw new Error(`ES index failed (${res.status}): ${text}`);
   }
   return res.json();
@@ -295,16 +320,36 @@ export async function bulkIndex(docs: AuditDocument[]): Promise<{ errors: boolea
   }
   const body = lines.join('\n') + '\n';
 
-  const res = await esFetch('/_bulk', {
-    method: 'POST',
-    body,
-  });
-
+  let res = await esFetch('/_bulk', { method: 'POST', body });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`ES bulk failed (${res.status}): ${text}`);
   }
-  return res.json();
+  let json = (await res.json()) as { errors?: boolean; items?: Array<{ index?: { _index?: string; error?: { type?: string } } }> };
+
+  // A _bulk call returns HTTP 200 even when individual items fail. Detect items
+  // whose target index does not exist, create those indices (+ template), then
+  // retry the whole bulk once. Re-indexing already-succeeded items is idempotent
+  // (the `index` op upserts by _id), so a single full retry is safe.
+  const missing = [
+    ...new Set(
+      (json.items ?? [])
+        .filter((it) => it.index?.error?.type === 'index_not_found_exception')
+        .map((it) => it.index?._index)
+        .filter((name): name is string => Boolean(name)),
+    ),
+  ];
+  if (missing.length > 0) {
+    await ensureIndexTemplate();
+    for (const idx of missing) await ensureIndexExists(idx);
+    res = await esFetch('/_bulk', { method: 'POST', body });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`ES bulk failed (${res.status}): ${text}`);
+    }
+    json = (await res.json()) as typeof json;
+  }
+  return json as { errors: boolean; items: Array<Record<string, unknown>> };
 }
 
 // ─── E2E ES Override Helper ──────────────────────────────────────────────────
