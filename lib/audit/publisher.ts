@@ -243,27 +243,82 @@ function prepareEvent(input: AuditEventPayload): PreparedEvent | null {
 
 // ─── Flush ──────────────────────────────────────────────────────────────────
 
+// Cap on events held for retry after a durable-write failure. Bounds memory
+// during a long storage outage (2026-07-02: MinIO disk-full for ~6h would have
+// accumulated ~unbounded events). Overflow drops the OLDEST events — loudly.
+const MAX_PENDING_EVENTS = 5000;
+let _maxPendingEvents = MAX_PENDING_EVENTS;
+
+/**
+ * Put failed events back at the head of the buffer so the 2s flush timer
+ * retries them. Never silent: logs a greppable DURABLE-WRITE FAILURE line,
+ * and an AUDIT EVENTS DROPPED line when the retry cap forces loss.
+ */
+function requeueForRetry(events: PreparedEvent[], err: unknown): void {
+  _buffer.unshift(...events);
+  let dropped = 0;
+  if (_buffer.length > _maxPendingEvents) {
+    dropped = _buffer.length - _maxPendingEvents;
+    _buffer.splice(0, dropped); // drop OLDEST (front) — failing the longest
+  }
+  console.error(
+    `[Audit] DURABLE-WRITE FAILURE — requeued ${events.length} event(s) for retry ` +
+    `(pending=${_buffer.length}): ${(err as Error)?.message ?? String(err)}`,
+  );
+  if (dropped > 0) {
+    console.error(
+      `[Audit] AUDIT EVENTS DROPPED (${dropped}) — retry buffer cap ${_maxPendingEvents} ` +
+      'exceeded during a storage outage. These events are permanently lost.',
+    );
+  }
+}
+
 async function flush(): Promise<void> {
   if (_buffer.length === 0) return;
   const batch = _buffer.splice(0);
 
-  // 1. WORM body in MinIO. Failure aborts the flush; PG is untouched.
-  await Promise.all(batch.map(e => putAuditBody({
-    agencyId: e.agencyId,
-    eventId: e.eventId,
-    body: e.bodyBytes,
-  })));
+  // 1. WORM body in MinIO. Failure aborts the flush; PG is untouched — so the
+  //    ENTIRE batch is requeued for the next timer tick (re-PUTting the same
+  //    key/body on retry is safe; versioned bucket, identical content).
+  try {
+    await Promise.all(batch.map(e => putAuditBody({
+      agencyId: e.agencyId,
+      eventId: e.eventId,
+      body: e.bodyBytes,
+    })));
+  } catch (err) {
+    requeueForRetry(batch, err);
+    throw err;
+  }
 
-  // 2. Chain insert per agency.
+  // 2. Chain insert per agency. Each insertChainBatch is atomic (one
+  //    transaction), so a failure requeues ONLY that agency's events — the
+  //    succeeded agencies must not be re-inserted (eventId is unique).
   const byAgency = new Map<string, PreparedEvent[]>();
   for (const e of batch) {
     const arr = byAgency.get(e.agencyId) ?? [];
     arr.push(e);
     byAgency.set(e.agencyId, arr);
   }
+  const chainFailed: PreparedEvent[] = [];
+  let chainErr: unknown = null;
   for (const [agencyId, events] of byAgency) {
-    await insertChainBatch(agencyId, events);
+    try {
+      await insertChainBatch(agencyId, events);
+    } catch (err) {
+      chainFailed.push(...events);
+      chainErr = err;
+      byAgency.delete(agencyId); // exclude from downstream steps this round
+    }
   }
+  if (chainFailed.length > 0) {
+    requeueForRetry(chainFailed, chainErr);
+  }
+  // Downstream steps (mirror / ES / forwarders) run only for events whose
+  // chain row committed — requeued events get theirs on the successful retry.
+  const committed = chainFailed.length === 0
+    ? batch
+    : batch.filter(e => byAgency.has(e.agencyId));
 
   // 2.5. Read projection (audit_events_mirror). Best-effort and INTENTIONALLY
   // outside the chain transaction: the hash chain + S3 body are the source of
@@ -273,7 +328,7 @@ async function flush(): Promise<void> {
   // does not depend on the capacity-capped Searchly cluster, whose index limit
   // silently drops new events (#1766 / #1924). A failure here leaves the chain
   // intact and is recoverable by replaying bodies from S3.
-  await writeProjectionBatch(batch).catch(err =>
+  await writeProjectionBatch(committed).catch(err =>
     console.warn('[Audit] read-projection write failed (non-fatal):', (err as Error).message));
 
   // 3. Enqueue ES indexing — fire-and-forget. The audit chain commit
@@ -284,7 +339,7 @@ async function flush(): Promise<void> {
   // 30s cap.
   const { enqueueJob } = getRuntime();
   if (enqueueJob) {
-    for (const e of batch) {
+    for (const e of committed) {
       void enqueueJob('audit_index_es', { eventId: e.eventId }).catch((err: unknown) => {
         console.warn('[Audit] ES-indexing enqueue failed:', (err as Error).message);
       });
@@ -298,6 +353,11 @@ async function flush(): Promise<void> {
     enqueueForwardJobs(agencyId, events.map(e => e.forwardable))
       .catch(err => console.warn('[Audit] enqueueForwardJobs failed:', (err as Error).message));
   }
+
+  // Surface the partial failure to callers (timer/immediate-flush log it;
+  // flushAll propagates it to E2E/seed callers) AFTER the committed portion's
+  // downstream steps ran. The failed events are already requeued above.
+  if (chainErr) throw chainErr;
 }
 
 // ─── Read projection (audit_events_mirror) ──────────────────────────────────
@@ -506,6 +566,17 @@ export function __resetPublisherForTest(): void {
   _buffer = [];
   if (_flushTimer) { clearInterval(_flushTimer); _flushTimer = null; }
   _initialized = false;
+}
+
+// Test seam — events currently buffered/awaiting (re)flush.
+export function __pendingCountForTest(): number {
+  return _buffer.length;
+}
+
+// Test seam — shrink the retry cap so the overflow path is testable without
+// driving thousands of events through the public API. Pass null to restore.
+export function __setMaxPendingForTest(n: number | null): void {
+  _maxPendingEvents = n ?? MAX_PENDING_EVENTS;
 }
 
 // ─── Legacy event mapping (preserved verbatim from prior version) ───────────
