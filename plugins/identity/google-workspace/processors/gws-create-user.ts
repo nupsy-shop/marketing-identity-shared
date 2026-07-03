@@ -36,6 +36,22 @@ export default async function gwsCreateUser(job: Bull.Job): Promise<JobResult> {
     return { status: 'completed', jobType: 'gws_create_user' };
   }
 
+  // 1b. Guard: a null tenantId makes the identity_sources.findFirst below throw
+  // "Argument agency_id must not be null" (Prisma rejects null equality on a
+  // required column), surfacing as an opaque job failure. This should never
+  // reach the queue — the enqueue side now refuses it — but treat a malformed
+  // legacy/replayed job as ERROR with a clear reason instead of a hard throw.
+  if (!tenantId) {
+    logger.error('gws_create_user: job missing tenantId — cannot resolve GWS source', { jobId: String(job.id), identityId });
+    await updateProviderStatus(prisma, identityId, 'google-workspace', {
+      status: ProviderStatus.ERROR,
+      reason: 'Missing tenant id on provisioning job — agency could not be resolved',
+      updatedAt: new Date().toISOString(),
+    });
+    await reconcileProvisioningStatus(prisma, identityId);
+    return { status: 'completed', jobType: 'gws_create_user' };
+  }
+
   // 2. Load GWS source config from DB
   const source = await prisma.identity_sources.findFirst({
     where: {
