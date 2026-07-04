@@ -292,6 +292,33 @@ export async function tagSyntheticIdentity(userId: string, tag: string, realm = 
 }
 
 /**
+ * Update a Keycloak user's standard profile fields (email/name). Unlike
+ * mergeUserAttributes (custom attributes), this heals the CORE profile — used to
+ * repair a synthetic user that was created/recreated without email/name, which
+ * otherwise excludes it from the PAM identity chooser and yields an empty SAML
+ * NameID (#2312). Only the provided fields are changed.
+ */
+export async function updateKeycloakUserProfile(
+  userId: string,
+  profile: { email?: string; emailVerified?: boolean; firstName?: string; lastName?: string },
+  realm = 'master',
+  agencyId?: string,
+): Promise<void> {
+  const user = await getKeycloakUser(realm, userId, agencyId);
+  if (!user) throw new Error(`User ${userId} not found`);
+
+  const res = await adminFetch(realm, `/users/${userId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ ...user, ...profile }),
+  }, agencyId);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to update user profile (${res.status}): ${text}`);
+  }
+}
+
+/**
  * Add a Keycloak user to a realm group by group NAME (e.g. 'PamSyntheticIdentities').
  * Idempotent — Keycloak's PUT membership is a no-op if already a member.
  */

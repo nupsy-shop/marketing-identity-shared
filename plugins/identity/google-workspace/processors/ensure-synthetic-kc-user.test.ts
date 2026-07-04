@@ -57,6 +57,26 @@ describe('ensureSyntheticKcUser', () => {
     expect(out).toEqual({ keycloakUserId: 'kc-existing' });
   });
 
+  it('heals email/name on an existing KC user when updateKeycloakUser is provided (#2312)', async () => {
+    const prisma = makePrisma();
+    const createKeycloakUser = vi.fn();
+    const addToSyntheticGroup = vi.fn().mockResolvedValue(undefined);
+    const updateKeycloakUser = vi.fn().mockResolvedValue(undefined);
+    await ensureSyntheticKcUser({
+      prisma, createKeycloakUser, addToSyntheticGroup, updateKeycloakUser,
+      realm: 'agency-trevox', agencyId: 'ag-1', identityId: 'idy-1',
+      primaryEmail: 'syn@trevox.agency', givenName: 'GWS Demo', familyName: 'Synthetic',
+      existingKeycloakUserId: 'kc-existing',
+    });
+    expect(createKeycloakUser).not.toHaveBeenCalled();
+    expect(updateKeycloakUser).toHaveBeenCalledWith(
+      'kc-existing',
+      { email: 'syn@trevox.agency', emailVerified: true, firstName: 'GWS Demo', lastName: 'Synthetic' },
+      'agency-trevox',
+    );
+    expect(addToSyntheticGroup).toHaveBeenCalledWith('kc-existing');
+  });
+
   it('throws if primaryEmail is missing (cannot key a synthetic KC user)', async () => {
     const prisma = makePrisma();
     await expect(

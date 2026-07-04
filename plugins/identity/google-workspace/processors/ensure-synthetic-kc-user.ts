@@ -23,6 +23,17 @@ interface EnsureArgs {
   ) => Promise<KeycloakUserLike>;
   /** Optional: called with the resolved KC user ID after creation/lookup to add them to a group. */
   addToSyntheticGroup?: (userId: string) => Promise<void>;
+  /**
+   * Optional: heal an EXISTING KC user's standard profile (email/name). A synthetic
+   * recreated/incompletely-provisioned can have a username but no email/name, which
+   * excludes it from the PAM chooser and yields an empty SAML NameID (#2312). When
+   * provided, the existing-user branch repairs those fields.
+   */
+  updateKeycloakUser?: (
+    userId: string,
+    profile: { email?: string; emailVerified?: boolean; firstName?: string; lastName?: string },
+    realm: string,
+  ) => Promise<unknown>;
   realm: string;
   agencyId: string;
   identityId: string;
@@ -39,11 +50,20 @@ export async function ensureSyntheticKcUser(args: EnsureArgs): Promise<{ keycloa
   }
 
   if (args.existingKeycloakUserId) {
-    // Already linked — only enforce the identifier==primaryEmail correlation invariant.
+    // Already linked — enforce the identifier==primaryEmail correlation invariant.
     await prisma.integration_identities.update({
       where: { id: identityId },
       data: { identifier: primaryEmail, updatedAt: new Date() },
     });
+    // Heal the KC user profile so it is present in the chooser and yields a valid
+    // SAML NameID (recreated/incompletely-provisioned users can lack email/name).
+    if (args.updateKeycloakUser) {
+      await args.updateKeycloakUser(
+        args.existingKeycloakUserId,
+        { email: primaryEmail, emailVerified: true, firstName: givenName, lastName: familyName },
+        realm,
+      );
+    }
     await args.addToSyntheticGroup?.(args.existingKeycloakUserId);
     return { keycloakUserId: args.existingKeycloakUserId };
   }
