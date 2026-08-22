@@ -1,34 +1,22 @@
 /**
- * MinIO (S3-compatible) archive client for audit event bodies.
+ * Object-store archive client for audit event bodies.
  *
  * Bodies are written once at publish time with Object Lock Compliance + 7-year
  * retention. Object Lock makes the body immutable to all roles (including
  * platform admin) for the retention window — this is the core WORM guarantee
  * that backs the "tamper-evident" claim.
  *
- * Endpoint: Stackhero MinIO addon. Provides S3-compatible API; we use the
- * AWS SDK's S3 client pointed at the Stackhero endpoint.
+ * Client construction (Stackhero MinIO on Heroku, AWS task-role on ECS) is
+ * decided by the object-store provider seam — see lib/storage/object-store.ts.
  */
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { makeObjectStoreClient } from '../storage/object-store.js';
 
 let _client: S3Client | null = null;
 
 function getClient(): S3Client {
   if (_client) return _client;
-  const host = process.env.STACKHERO_MINIO_HOST;
-  const accessKeyId = process.env.STACKHERO_MINIO_ROOT_ACCESS_KEY;
-  const secretAccessKey = process.env.STACKHERO_MINIO_ROOT_SECRET_KEY;
-  if (!host || !accessKeyId || !secretAccessKey) {
-    throw new Error(
-      '[audit] MinIO config missing: set STACKHERO_MINIO_HOST, STACKHERO_MINIO_ROOT_ACCESS_KEY, STACKHERO_MINIO_ROOT_SECRET_KEY',
-    );
-  }
-  _client = new S3Client({
-    endpoint: `https://${host}`,
-    region: 'us-east-1', // MinIO ignores region; required by SDK
-    credentials: { accessKeyId, secretAccessKey },
-    forcePathStyle: true,
-  });
+  _client = makeObjectStoreClient();
   return _client;
 }
 

@@ -6,19 +6,8 @@
  * STH integrity records persist in the WORM bucket.
  */
 import { getRuntime } from '../runtime.js';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-
-function getClient(): S3Client {
-  const host = process.env.STACKHERO_MINIO_HOST!;
-  const accessKeyId = process.env.STACKHERO_MINIO_ROOT_ACCESS_KEY!;
-  const secretAccessKey = process.env.STACKHERO_MINIO_ROOT_SECRET_KEY!;
-  return new S3Client({
-    endpoint: `https://${host}`,
-    region: 'us-east-1',
-    credentials: { accessKeyId, secretAccessKey },
-    forcePathStyle: true,
-  });
-}
+import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { makeObjectStoreClient } from '../storage/object-store.js';
 
 function ymd(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -36,7 +25,7 @@ export async function runArchiveSnapshot(): Promise<void> {
   if (!Bucket) throw new Error('[audit] AUDIT_BUCKET not set');
   const { prisma } = getRuntime();
   if (!prisma) throw new Error('[audit] runtime.prisma not registered');
-  const client = getClient();
+  const client = makeObjectStoreClient();
 
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const sths = await prisma.auditSth.findMany({ where: { signedAt: { gte: since } } });
