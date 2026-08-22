@@ -1,5 +1,5 @@
 /**
- * Audit export storage — MinIO PUT + 7-day presigned-URL helper.
+ * Audit export storage — object-store PUT + 7-day presigned-URL helper.
  *
  * Bodies are written to the agency's audit bucket under
  *   audit-exports/{agencyId}/{scheduleId}/{ISO}.{ext}
@@ -8,11 +8,15 @@
  * policy operated outside this code path; the presigned URL we return is
  * scoped to a matching 7-day TTL so both sides agree on the cutoff.
  *
- * SDK loaded via dynamic import so build-time / typecheck environments
- * without `@aws-sdk/client-s3` installed don't fail.
+ * Client construction (Stackhero MinIO on Heroku, AWS task-role on ECS) is
+ * decided by the object-store provider seam — see lib/storage/object-store.ts.
+ * `getSignedUrl` is still loaded via dynamic import so build-time /
+ * typecheck environments without `@aws-sdk/s3-request-presigner` installed
+ * don't fail.
  */
 
 import { getRuntime } from '../runtime.js';
+import { makeObjectStoreClient } from '../storage/object-store.js';
 
 export interface UploadExportArgs {
   agencyId: string;
@@ -37,35 +41,27 @@ const PRESIGN_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
 export async function uploadExport(args: UploadExportArgs): Promise<UploadResult> {
   const { logger } = getRuntime();
-  const host = process.env.STACKHERO_MINIO_HOST;
-  const accessKeyId = process.env.STACKHERO_MINIO_ROOT_ACCESS_KEY;
-  const secretAccessKey = process.env.STACKHERO_MINIO_ROOT_SECRET_KEY;
   const Bucket = process.env.AUDIT_BUCKET;
 
   const Key = exportKey(args);
 
-  if (!host || !accessKeyId || !secretAccessKey || !Bucket) {
-    logger.warn('[audit-export] MinIO config missing — returning unsigned reference (non-production fallback)', {
+  if (!Bucket) {
+    logger.warn('[audit-export] AUDIT_BUCKET not set — returning unsigned reference (non-production fallback)', {
       agencyId: args.agencyId,
       scheduleId: args.scheduleId,
       key: Key,
     });
     return {
       key: Key,
-      presignedUrl: `s3://${Bucket ?? 'audit-bucket'}/${Key}`,
+      presignedUrl: `s3://audit-bucket/${Key}`,
       sizeBytes: args.bytes.length,
     };
   }
 
-  const { S3Client, PutObjectCommand, GetObjectCommand } = await import('@aws-sdk/client-s3');
+  const { PutObjectCommand, GetObjectCommand } = await import('@aws-sdk/client-s3');
   const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
 
-  const client = new S3Client({
-    endpoint: `https://${host}`,
-    region: 'us-east-1',
-    credentials: { accessKeyId, secretAccessKey },
-    forcePathStyle: true,
-  });
+  const client = makeObjectStoreClient();
 
   await client.send(new PutObjectCommand({
     Bucket,

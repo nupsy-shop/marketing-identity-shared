@@ -13,7 +13,7 @@
  * Bundle PUT to MinIO at audit/exports/<jobId>.tar.gz with Object Lock
  * (24-hour retention — bundles are ephemeral; user re-requests if expired).
  */
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -21,18 +21,7 @@ import { getRuntime } from '../runtime.js';
 import { buildInclusionProof } from './proof.js';
 import { listPublicKeys } from './keys.js';
 import { getAuditBody } from './minio-archive.js';
-
-function s3Client(): S3Client {
-  return new S3Client({
-    endpoint: `https://${process.env.STACKHERO_MINIO_HOST}`,
-    region: 'us-east-1',
-    credentials: {
-      accessKeyId: process.env.STACKHERO_MINIO_ROOT_ACCESS_KEY!,
-      secretAccessKey: process.env.STACKHERO_MINIO_ROOT_SECRET_KEY!,
-    },
-    forcePathStyle: true,
-  });
-}
+import { makeObjectStoreClient } from '../storage/object-store.js';
 
 function bigintReplacer(_k: string, v: unknown): unknown {
   if (typeof v === 'bigint') return v.toString();
@@ -146,7 +135,7 @@ export async function runExportJob(jobId: string): Promise<void> {
     const Key = `audit/exports/${jobId}.tar.gz`;
     const tarballBytes = await fs.readFile(tarballPath);
     const retainUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    await s3Client().send(new PutObjectCommand({
+    await makeObjectStoreClient().send(new PutObjectCommand({
       Bucket, Key, Body: tarballBytes, ContentType: 'application/gzip',
       ObjectLockMode: 'GOVERNANCE',
       ObjectLockRetainUntilDate: retainUntil,
